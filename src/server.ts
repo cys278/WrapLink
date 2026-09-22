@@ -1,14 +1,34 @@
 import { buildApp } from "./app.js";
+import { createRedisClient } from "./cache/redis-client.js";
 import { loadConfig } from "./config.js";
 import { createDatabasePool } from "./database/pool.js";
+import { CachedLinkStore } from "./store/cached-link-store.js";
 import { PostgresLinkStore } from "./store/postgres-link-store.js";
 
 const config = loadConfig();
+
 const pool = createDatabasePool(config);
-const store = new PostgresLinkStore(pool);
+const redis = createRedisClient(config);
+
+const postgresStore = new PostgresLinkStore(pool);
+const store = new CachedLinkStore(
+  postgresStore,
+  redis,
+  config.redisCacheTtlSeconds,
+);
+
 const app = buildApp(config, store);
 
 let shuttingDown = false;
+
+async function closeResources(): Promise<void> {
+  await Promise.all([
+    pool.end(),
+    redis.isOpen
+      ? redis.close()
+      : Promise.resolve(),
+  ]);
+}
 
 async function shutdown(signal: string): Promise<void> {
   if (shuttingDown) return;
@@ -18,7 +38,7 @@ async function shutdown(signal: string): Promise<void> {
 
   try {
     await app.close();
-    await pool.end();
+    await closeResources();
     process.exitCode = 0;
   } catch (error) {
     app.log.error(error, "graceful shutdown failed");
@@ -30,11 +50,26 @@ process.once("SIGINT", () => void shutdown("SIGINT"));
 process.once("SIGTERM", () => void shutdown("SIGTERM"));
 
 try {
-  // Fail during startup instead of accepting requests with a broken database.
+  // PostgreSQL is required because it is the source of truth.
   await pool.query("SELECT 1");
-  await app.listen({ host: config.host, port: config.port });
+
+  // Redis is optional: the API can fall back to PostgreSQL.
+  try {
+    await redis.connect();
+  } catch (error) {
+    app.log.warn(
+      { error },
+      "Redis unavailable; continuing without cache",
+    );
+  }
+
+  await app.listen({
+    host: config.host,
+    port: config.port,
+  });
 } catch (error) {
   app.log.error(error, "server startup failed");
-  await pool.end().catch(() => undefined);
+
+  await closeResources().catch(() => undefined);
   process.exitCode = 1;
 }

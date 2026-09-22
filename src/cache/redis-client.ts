@@ -9,8 +9,14 @@ export function createRedisClient(config: RedisConfig) {
     socket: {
       connectTimeout: 5_000,
       reconnectStrategy(retries) {
-        return Math.min(retries * 50, 1_000);
-      },
+  if (retries >= 5) {
+    return new Error(
+      "Redis reconnection limit reached",
+    );
+  }
+
+  return Math.min(retries * 50, 1_000);
+},
     },
   });
 
