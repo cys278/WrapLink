@@ -14,6 +14,8 @@ const config = {
   databasePoolMax: 5,
   redisUrl: "redis://127.0.0.1:6379",
   redisCacheTtlSeconds: 300,
+  createRateLimitMax: 20,
+  createRateLimitWindowSeconds: 60,
 };
 let app: FastifyInstance | undefined;
 

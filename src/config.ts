@@ -8,6 +8,8 @@ export interface AppConfig {
   databasePoolMax: number;
   redisUrl: string;
   redisCacheTtlSeconds: number;
+  createRateLimitMax: number;
+  createRateLimitWindowSeconds: number;
 }
 
 function integer(name: string, fallback: number): number {
@@ -40,6 +42,14 @@ export function loadConfig(): AppConfig {
   redisCacheTtlSeconds: integer(
   "REDIS_CACHE_TTL_SECONDS",
   300,
+),
+createRateLimitMax: integer(
+  "CREATE_RATE_LIMIT_MAX",
+  20,
+),
+createRateLimitWindowSeconds: integer(
+  "CREATE_RATE_LIMIT_WINDOW_SECONDS",
+  60,
 ),
   };
 }
