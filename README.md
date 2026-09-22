@@ -1,4 +1,4 @@
-# Hyper Shortener
+# WrapLink
 
 A production-minded URL shortener and performance engineering lab. The goal is to learn how a real service evolves from one process and in-memory storage to PostgreSQL, Redis, multiple workers, and an optimized C++ hot path—while measuring every claim.
 
