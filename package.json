@@ -10,7 +10,8 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "bench": "autocannon -c 100 -d 15 -p 10 http://localhost:3000/health"
+    "bench": "autocannon -c 100 -d 15 -p 10 http://localhost:3000/health",
+    "db:migrate": "tsx src/database/migrate.ts"
   },
   "engines": {
     "node": ">=22"
