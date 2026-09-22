@@ -20,7 +20,9 @@ export class CachedLinkStore implements LinkStore {
     private readonly ttlSeconds: number,
   ) {}
 
-  async create(input: CreateLinkInput): Promise<Link | null> {
+  async create(
+    input: CreateLinkInput,
+  ): Promise<Link | null> {
     const link = await this.source.create(input);
 
     if (link) {
@@ -50,6 +52,11 @@ export class CachedLinkStore implements LinkStore {
     // PostgreSQL remains authoritative.
     await this.source.recordClick(code);
 
+    // Redis is optional. Avoid calling a disconnected client.
+    if (!this.redis.isReady) {
+      return;
+    }
+
     try {
       await this.redis.eval(INCREMENT_CACHED_CLICK, {
         keys: [this.key(code)],
@@ -71,7 +78,14 @@ export class CachedLinkStore implements LinkStore {
     return `wraplink:link:${code}`;
   }
 
-  private async cacheSafely(link: Link): Promise<void> {
+  private async cacheSafely(
+    link: Link,
+  ): Promise<void> {
+    // Fall back to PostgreSQL when Redis is unavailable.
+    if (!this.redis.isReady) {
+      return;
+    }
+
     try {
       await this.cache(link);
     } catch (error) {
@@ -101,7 +115,8 @@ export class CachedLinkStore implements LinkStore {
         code: link.code,
         targetUrl: link.targetUrl,
         createdAt: link.createdAt.toISOString(),
-        expiresAt: link.expiresAt?.toISOString() ?? "",
+        expiresAt:
+          link.expiresAt?.toISOString() ?? "",
         clicks: String(link.clicks),
       })
       .expire(this.key(link.code), ttl)
@@ -111,6 +126,12 @@ export class CachedLinkStore implements LinkStore {
   private async readSafely(
     code: string,
   ): Promise<Link | null> {
+    // A cache miss and an unavailable cache both fall back
+    // to the authoritative PostgreSQL store.
+    if (!this.redis.isReady) {
+      return null;
+    }
+
     try {
       const values = await this.redis.hGetAll(
         this.key(code),
@@ -171,7 +192,11 @@ export class CachedLinkStore implements LinkStore {
         clicks,
       };
     } catch (error) {
-      console.warn("Could not read cached link:", error);
+      console.warn(
+        "Could not read cached link:",
+        error,
+      );
+
       return null;
     }
   }
