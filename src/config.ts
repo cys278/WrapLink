@@ -6,6 +6,8 @@ export interface AppConfig {
   maxLinks: number;
   databaseUrl: string;
   databasePoolMax: number;
+  redisUrl: string;
+  redisCacheTtlSeconds: number;
 }
 
 function integer(name: string, fallback: number): number {
@@ -32,5 +34,12 @@ export function loadConfig(): AppConfig {
       process.env.DATABASE_URL ??
       "postgresql://shortener:shortener@127.0.0.1:55432/shortener",
     databasePoolMax: integer("DATABASE_POOL_MAX", 20),
+    redisUrl:
+  process.env.REDIS_URL ??
+  "redis://127.0.0.1:6379",
+  redisCacheTtlSeconds: integer(
+  "REDIS_CACHE_TTL_SECONDS",
+  300,
+),
   };
 }

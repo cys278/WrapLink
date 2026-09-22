@@ -15,6 +15,8 @@ const config = {
   maxLinks: 100,
   databaseUrl,
   databasePoolMax: 5,
+  redisUrl: "redis://127.0.0.1:6379",
+  redisCacheTtlSeconds: 300,
 };
 
 const pool = new Pool({
