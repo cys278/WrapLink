@@ -1,5 +1,11 @@
-import { afterAll, beforeEach, describe, expect, it } from "vitest";
 import { Pool } from "pg";
+import {
+  afterAll,
+  beforeEach,
+  describe,
+  expect,
+  it,
+} from "vitest";
 import { buildApp } from "../../src/app.js";
 import { PostgresLinkStore } from "../../src/store/postgres-link-store.js";
 
@@ -19,6 +25,9 @@ const config = {
   redisCacheTtlSeconds: 300,
   createRateLimitMax: 20,
   createRateLimitWindowSeconds: 60,
+  createApiKeys: [
+    "wraplink-test-key-0000000000000001",
+  ],
 };
 
 const pool = new Pool({
@@ -39,55 +48,70 @@ afterAll(async () => {
 });
 
 describe("PostgreSQL-backed API", () => {
-  it("creates, redirects and persists click statistics", async () => {
-    const created = await app.inject({
-      method: "POST",
-      url: "/api/v1/links",
-      payload: {
-        url: "https://example.com/database",
-        customCode: "database",
-      },
-    });
+  it(
+    "creates, redirects and persists click statistics",
+    async () => {
+      const created = await app.inject({
+        method: "POST",
+        url: "/api/v1/links",
+        payload: {
+          url: "https://example.com/database",
+          customCode: "database",
+        },
+      });
 
-    expect(created.statusCode).toBe(201);
-    expect(created.json()).toMatchObject({
-      code: "database",
-      shortUrl: "http://sho.rt/database",
-      targetUrl: "https://example.com/database",
-    });
+      expect(created.statusCode).toBe(201);
 
-    const redirect = await app.inject({
-      method: "GET",
-      url: "/database",
-    });
+      expect(created.json()).toMatchObject({
+        code: "database",
+        shortUrl: "http://sho.rt/database",
+        targetUrl:
+          "https://example.com/database",
+      });
 
-    expect(redirect.statusCode).toBe(302);
-    expect(redirect.headers.location).toBe(
-      "https://example.com/database",
-    );
+      const redirect = await app.inject({
+        method: "GET",
+        url: "/database",
+      });
 
-    const statistics = await app.inject({
-      method: "GET",
-      url: "/api/v1/links/database",
-    });
+      expect(redirect.statusCode).toBe(302);
 
-    expect(statistics.statusCode).toBe(200);
-    expect(statistics.json()).toMatchObject({
-      code: "database",
-      clicks: 1,
-    });
+      expect(
+        redirect.headers.location,
+      ).toBe(
+        "https://example.com/database",
+      );
 
-    const persisted = await pool.query<{
-      code: string;
-      clicks: string;
-    }>(
-      "SELECT code, clicks FROM links WHERE code = $1",
-      ["database"],
-    );
+      const statistics = await app.inject({
+        method: "GET",
+        url: "/api/v1/links/database",
+      });
 
-    expect(persisted.rows[0]).toEqual({
-      code: "database",
-      clicks: "1",
-    });
-  });
+      expect(statistics.statusCode).toBe(200);
+
+      expect(
+        statistics.json(),
+      ).toMatchObject({
+        code: "database",
+        clicks: 1,
+      });
+
+      const persisted = await pool.query<{
+        code: string;
+        clicks: string;
+      }>(
+        `
+          SELECT code, clicks
+          FROM links
+          WHERE code = $1
+        `,
+        ["database"],
+      );
+
+      expect(persisted.rows[0]).toEqual({
+        code: "database",
+        clicks: "1",
+      });
+    },
+  );
 });

@@ -22,6 +22,9 @@ const config = {
   redisCacheTtlSeconds: 300,
   createRateLimitMax: 20,
   createRateLimitWindowSeconds: 60,
+  createApiKeys: [
+    "wraplink-test-key-0000000000000001",
+  ],
 };
 
 let app: FastifyInstance | undefined;
@@ -50,6 +53,7 @@ describe("short links", () => {
       });
 
       expect(created.statusCode).toBe(201);
+
       expect(created.json().shortUrl).toBe(
         "http://sho.rt/docs",
       );
@@ -60,6 +64,7 @@ describe("short links", () => {
       });
 
       expect(redirect.statusCode).toBe(302);
+
       expect(
         redirect.headers.location,
       ).toBe("https://example.com/docs");
