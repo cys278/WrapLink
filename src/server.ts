@@ -2,6 +2,7 @@ import { buildApp } from "./app.js";
 import { createRedisClient } from "./cache/redis-client.js";
 import { loadConfig } from "./config.js";
 import { createDatabasePool } from "./database/pool.js";
+import { RedisRateLimiter } from "./security/rate-limiter.js";
 import { CachedLinkStore } from "./store/cached-link-store.js";
 import { PostgresLinkStore } from "./store/postgres-link-store.js";
 
@@ -10,14 +11,27 @@ const config = loadConfig();
 const pool = createDatabasePool(config);
 const redis = createRedisClient(config);
 
-const postgresStore = new PostgresLinkStore(pool);
+const postgresStore = new PostgresLinkStore(
+  pool,
+);
+
 const store = new CachedLinkStore(
   postgresStore,
   redis,
   config.redisCacheTtlSeconds,
 );
 
-const app = buildApp(config, store);
+const rateLimiter = new RedisRateLimiter(
+  redis,
+  config.createRateLimitMax,
+  config.createRateLimitWindowSeconds,
+);
+
+const app = buildApp(
+  config,
+  store,
+  rateLimiter,
+);
 
 let shuttingDown = false;
 
@@ -30,36 +44,57 @@ async function closeResources(): Promise<void> {
   ]);
 }
 
-async function shutdown(signal: string): Promise<void> {
+async function shutdown(
+  signal: string,
+): Promise<void> {
   if (shuttingDown) return;
+
   shuttingDown = true;
 
-  app.log.info({ signal }, "shutting down");
+  app.log.info(
+    { signal },
+    "shutting down",
+  );
 
   try {
     await app.close();
     await closeResources();
     process.exitCode = 0;
   } catch (error) {
-    app.log.error(error, "graceful shutdown failed");
+    app.log.error(
+      error,
+      "graceful shutdown failed",
+    );
+
     process.exitCode = 1;
   }
 }
 
-process.once("SIGINT", () => void shutdown("SIGINT"));
-process.once("SIGTERM", () => void shutdown("SIGTERM"));
+process.once("SIGINT", () => {
+  void shutdown("SIGINT");
+});
+
+process.once("SIGTERM", () => {
+  void shutdown("SIGTERM");
+});
 
 try {
-  // PostgreSQL is required because it is the source of truth.
+  // PostgreSQL is required because it is
+  // the durable source of truth.
   await pool.query("SELECT 1");
 
-  // Redis is optional: the API can fall back to PostgreSQL.
+  // Redis is optional for redirects because
+  // they can fall back to PostgreSQL.
+  //
+  // Link creation fails closed if Redis is
+  // unavailable because rate limiting cannot
+  // be enforced safely.
   try {
     await redis.connect();
   } catch (error) {
     app.log.warn(
       { error },
-      "Redis unavailable; continuing without cache",
+      "Redis unavailable; redirects will use PostgreSQL",
     );
   }
 
@@ -68,8 +103,14 @@ try {
     port: config.port,
   });
 } catch (error) {
-  app.log.error(error, "server startup failed");
+  app.log.error(
+    error,
+    "server startup failed",
+  );
 
-  await closeResources().catch(() => undefined);
+  await closeResources().catch(
+    () => undefined,
+  );
+
   process.exitCode = 1;
 }

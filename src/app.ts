@@ -5,6 +5,7 @@ import type { AppConfig } from "./config.js";
 import { generateCode } from "./domain/code.js";
 import type { LinkStore } from "./domain/link.js";
 import { Metrics } from "./metrics.js";
+import type { RateLimiter } from "./security/rate-limiter.js";
 
 interface CreateBody {
   url?: unknown;
@@ -37,6 +38,7 @@ function validHttpUrl(value: unknown): string | null {
 export function buildApp(
   config: AppConfig,
   store: LinkStore,
+  rateLimiter?: RateLimiter,
 ): FastifyInstance {
   const app = Fastify({
     logger: { level: config.logLevel },
@@ -89,6 +91,49 @@ export function buildApp(
   app.post<{ Body: CreateBody }>(
     "/api/v1/links",
     async (request, reply) => {
+      if (rateLimiter) {
+        try {
+          const result = await rateLimiter.consume(
+            request.ip,
+          );
+
+          reply.headers({
+            "rate-limit-limit": String(
+              result.limit,
+            ),
+            "rate-limit-remaining": String(
+              result.remaining,
+            ),
+            "rate-limit-reset": String(
+              result.retryAfterSeconds,
+            ),
+          });
+
+          if (!result.allowed) {
+            return reply
+              .header(
+                "retry-after",
+                String(
+                  result.retryAfterSeconds,
+                ),
+              )
+              .code(429)
+              .send({
+                error:
+                  "link creation rate limit exceeded",
+              });
+          }
+        } catch {
+          // Link creation fails closed when its
+          // abuse protection cannot be enforced.
+          // Redirects remain available.
+          return reply.code(503).send({
+            error:
+              "link creation is temporarily unavailable",
+          });
+        }
+      }
+
       const targetUrl = validHttpUrl(
         request.body?.url,
       );
@@ -131,7 +176,8 @@ export function buildApp(
         ttl === undefined
           ? null
           : new Date(
-              Date.now() + (ttl as number) * 1_000,
+              Date.now() +
+                (ttl as number) * 1_000,
             );
 
       for (
@@ -180,7 +226,9 @@ export function buildApp(
   app.get<{ Params: { code: string } }>(
     "/:code",
     async (request, reply) => {
-      if (!CODE_PATTERN.test(request.params.code)) {
+      if (
+        !CODE_PATTERN.test(request.params.code)
+      ) {
         metrics.miss();
 
         return reply.code(404).send({
@@ -203,7 +251,10 @@ export function buildApp(
       await store.recordClick(link.code);
       metrics.redirect();
 
-      return reply.redirect(link.targetUrl, 302);
+      return reply.redirect(
+        link.targetUrl,
+        302,
+      );
     },
   );
 
@@ -225,7 +276,8 @@ export function buildApp(
         targetUrl: link.targetUrl,
         shortUrl: `${config.baseUrl}/${link.code}`,
         clicks: link.clicks,
-        createdAt: link.createdAt.toISOString(),
+        createdAt:
+          link.createdAt.toISOString(),
         expiresAt:
           link.expiresAt?.toISOString() ?? null,
       };
