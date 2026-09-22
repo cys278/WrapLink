@@ -3,7 +3,16 @@ import type { FastifyInstance } from "fastify";
 import { buildApp } from "../src/app.js";
 import { MemoryLinkStore } from "../src/store/memory-link-store.js";
 
-const config = { host: "127.0.0.1", port: 3000, baseUrl: "http://sho.rt", logLevel: "silent", maxLinks: 100 };
+const config = {
+  host: "127.0.0.1",
+  port: 3000,
+  baseUrl: "http://sho.rt",
+  logLevel: "silent",
+  maxLinks: 100,
+  databaseUrl:
+    "postgresql://shortener:shortener@127.0.0.1:55432/shortener",
+  databasePoolMax: 5,
+};
 let app: FastifyInstance | undefined;
 
 afterEach(async () => { await app?.close(); app = undefined; });

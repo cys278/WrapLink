@@ -4,6 +4,8 @@ export interface AppConfig {
   baseUrl: string;
   logLevel: string;
   maxLinks: number;
+  databaseUrl: string;
+  databasePoolMax: number;
 }
 
 function integer(name: string, fallback: number): number {
@@ -20,8 +22,15 @@ export function loadConfig(): AppConfig {
   return {
     host: process.env.HOST ?? "0.0.0.0",
     port: integer("PORT", 3000),
-    baseUrl: (process.env.BASE_URL ?? "http://localhost:3000").replace(/\/$/, ""),
+    baseUrl: (process.env.BASE_URL ?? "http://localhost:3000").replace(
+      /\/$/,
+      "",
+    ),
     logLevel: process.env.LOG_LEVEL ?? "info",
     maxLinks: integer("MAX_LINKS", 100_000),
+    databaseUrl:
+      process.env.DATABASE_URL ??
+      "postgresql://shortener:shortener@127.0.0.1:55432/shortener",
+    databasePoolMax: integer("DATABASE_POOL_MAX", 20),
   };
 }
