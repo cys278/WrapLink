@@ -50,4 +50,37 @@ describe("short links", () => {
     const response = await app.inject({ method: "GET", url: "/gone" });
     expect(response.statusCode).toBe(404);
   });
+
+  it("adds baseline security headers", async () => {
+  app = buildApp(config, new MemoryLinkStore(100));
+
+  const response = await app.inject({
+    method: "GET",
+    url: "/health",
+  });
+
+  expect(response.headers).toMatchObject({
+    "content-security-policy": "default-src 'none'",
+    "permissions-policy":
+      "camera=(), microphone=(), geolocation=()",
+    "referrer-policy": "no-referrer",
+    "x-content-type-options": "nosniff",
+    "x-frame-options": "DENY",
+  });
+});
+
+it("rejects oversized request bodies", async () => {
+  app = buildApp(config, new MemoryLinkStore(100));
+
+  const response = await app.inject({
+    method: "POST",
+    url: "/api/v1/links",
+    payload: {
+      url: "https://example.com",
+      padding: "x".repeat(20 * 1_024),
+    },
+  });
+
+  expect(response.statusCode).toBe(413);
+});
 });

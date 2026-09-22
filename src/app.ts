@@ -23,8 +23,33 @@ function validHttpUrl(value: unknown): string | null {
 }
 
 export function buildApp(config: AppConfig, store: LinkStore): FastifyInstance {
-  const app = Fastify({ logger: { level: config.logLevel } });
+  const app = Fastify({
+  logger: { level: config.logLevel },
+
+  // The API accepts only small JSON documents.
+  bodyLimit: 16 * 1_024,
+
+  // Reduce exposure to slow-client resource exhaustion.
+  requestTimeout: 10_000,
+  connectionTimeout: 10_000,
+});
   const metrics = new Metrics();
+
+  app.addHook(
+  "onSend",
+  async (_request, reply, payload) => {
+    reply.headers({
+      "content-security-policy": "default-src 'none'",
+      "permissions-policy":
+        "camera=(), microphone=(), geolocation=()",
+      "referrer-policy": "no-referrer",
+      "x-content-type-options": "nosniff",
+      "x-frame-options": "DENY",
+    });
+
+    return payload;
+  },
+);
 
   app.addHook("onRequest", async () => { metrics.request(); });
 
