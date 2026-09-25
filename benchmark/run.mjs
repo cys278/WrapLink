@@ -61,6 +61,32 @@ const target = new URL(
   baseUrl,
 ).href;
 
+const expectedStatus = Number.parseInt(
+  process.env.BENCHMARK_EXPECTED_STATUS ??
+    "302",
+  10,
+);
+
+if (
+  !Number.isSafeInteger(expectedStatus) ||
+  expectedStatus < 100 ||
+  expectedStatus > 599
+) {
+  throw new Error(
+    "BENCHMARK_EXPECTED_STATUS must be a valid HTTP status code",
+  );
+}
+
+const preflight = await fetch(target, {
+  redirect: "manual",
+});
+
+if (preflight.status !== expectedStatus) {
+  throw new Error(
+    `Benchmark preflight expected HTTP ${expectedStatus}, received ${preflight.status}`,
+  );
+}
+
 console.info(`Profile: ${profileName}`);
 console.info(`Target: ${target}`);
 console.info(
