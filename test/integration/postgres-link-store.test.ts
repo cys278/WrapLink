@@ -31,6 +31,15 @@ afterAll(async () => {
 
 describe("PostgresLinkStore", () => {
   it(
+    "reports healthy when PostgreSQL is reachable",
+    async () => {
+      expect(
+        await store.isHealthy(),
+      ).toBe(true);
+    },
+  );
+
+  it(
     "creates and retrieves a link",
     async () => {
       const created = await store.create({
