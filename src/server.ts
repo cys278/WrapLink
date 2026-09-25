@@ -46,6 +46,15 @@ const app = buildApp(
 
 let shuttingDown = false;
 
+function disconnectFromPrimary(): void {
+  if (
+    process.connected &&
+    typeof process.disconnect === "function"
+  ) {
+    process.disconnect();
+  }
+}
+
 async function closeResources(): Promise<void> {
   await Promise.all([
     pool.end(),
@@ -80,6 +89,10 @@ async function shutdown(
     );
 
     process.exitCode = 1;
+  } finally {
+    // Cluster workers must close their IPC channel
+    // after releasing application resources.
+    disconnectFromPrimary();
   }
 }
 
@@ -126,4 +139,5 @@ try {
   );
 
   process.exitCode = 1;
+  disconnectFromPrimary();
 }
