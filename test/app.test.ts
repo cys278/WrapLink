@@ -8,6 +8,7 @@ import {
 import { buildApp } from "../src/app.js";
 import { HashedApiKeyAuthenticator } from "../src/security/api-key-authenticator.js";
 import type { RateLimiter } from "../src/security/rate-limiter.js";
+import { SafeUrlPolicy } from "../src/security/url-policy.js";
 import { MemoryLinkStore } from "../src/store/memory-link-store.js";
 
 const config = {
@@ -54,6 +55,7 @@ describe("short links", () => {
       });
 
       expect(created.statusCode).toBe(201);
+
       expect(created.json().shortUrl).toBe(
         "http://sho.rt/docs",
       );
@@ -64,6 +66,7 @@ describe("short links", () => {
       });
 
       expect(redirect.statusCode).toBe(302);
+
       expect(
         redirect.headers.location,
       ).toBe("https://example.com/docs");
@@ -320,7 +323,52 @@ describe("short links", () => {
         },
       });
 
-      expect(authorized.statusCode).toBe(201);
+      expect(
+        authorized.statusCode,
+      ).toBe(201);
+    },
+  );
+
+  it(
+    "rejects private-network destination URLs",
+    async () => {
+      app = buildApp(
+        config,
+        new MemoryLinkStore(100),
+        undefined,
+        undefined,
+        new SafeUrlPolicy(),
+      );
+
+      const loopback = await app.inject({
+        method: "POST",
+        url: "/api/v1/links",
+        payload: {
+          url: "http://127.0.0.1:8080/admin",
+          customCode: "loopback",
+        },
+      });
+
+      expect(loopback.statusCode).toBe(400);
+
+      expect(loopback.json()).toEqual({
+        error:
+          "url must be a valid and publicly reachable http or https URL",
+      });
+
+      const metadataService =
+        await app.inject({
+          method: "POST",
+          url: "/api/v1/links",
+          payload: {
+            url: "http://169.254.169.254/latest/meta-data",
+            customCode: "metadata",
+          },
+        });
+
+      expect(
+        metadataService.statusCode,
+      ).toBe(400);
     },
   );
 });

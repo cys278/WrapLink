@@ -4,6 +4,7 @@ import { loadConfig } from "./config.js";
 import { createDatabasePool } from "./database/pool.js";
 import { HashedApiKeyAuthenticator } from "./security/api-key-authenticator.js";
 import { RedisRateLimiter } from "./security/rate-limiter.js";
+import { SafeUrlPolicy } from "./security/url-policy.js";
 import { CachedLinkStore } from "./store/cached-link-store.js";
 import { PostgresLinkStore } from "./store/postgres-link-store.js";
 
@@ -33,11 +34,14 @@ const apiKeyAuthenticator =
     config.createApiKeys,
   );
 
+const urlPolicy = new SafeUrlPolicy();
+
 const app = buildApp(
   config,
   store,
   rateLimiter,
   apiKeyAuthenticator,
+  urlPolicy,
 );
 
 let shuttingDown = false;
@@ -54,7 +58,9 @@ async function closeResources(): Promise<void> {
 async function shutdown(
   signal: string,
 ): Promise<void> {
-  if (shuttingDown) return;
+  if (shuttingDown) {
+    return;
+  }
 
   shuttingDown = true;
 

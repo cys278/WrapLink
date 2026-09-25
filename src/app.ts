@@ -7,6 +7,7 @@ import type { LinkStore } from "./domain/link.js";
 import { Metrics } from "./metrics.js";
 import type { ApiKeyAuthenticator } from "./security/api-key-authenticator.js";
 import type { RateLimiter } from "./security/rate-limiter.js";
+import type { UrlPolicy } from "./security/url-policy.js";
 
 interface CreateBody {
   url?: unknown;
@@ -16,7 +17,9 @@ interface CreateBody {
 
 const CODE_PATTERN = /^[A-Za-z0-9_-]{4,32}$/;
 
-function validHttpUrl(value: unknown): string | null {
+function validHttpUrl(
+  value: unknown,
+): string | null {
   if (
     typeof value !== "string" ||
     value.length > 2_048
@@ -41,6 +44,7 @@ export function buildApp(
   store: LinkStore,
   rateLimiter?: RateLimiter,
   apiKeyAuthenticator?: ApiKeyAuthenticator,
+  urlPolicy?: UrlPolicy,
 ): FastifyInstance {
   const app = Fastify({
     logger: { level: config.logLevel },
@@ -55,7 +59,8 @@ export function buildApp(
     "onSend",
     async (_request, reply, payload) => {
       reply.headers({
-        "content-security-policy": "default-src 'none'",
+        "content-security-policy":
+          "default-src 'none'",
         "permissions-policy":
           "camera=(), microphone=(), geolocation=()",
         "referrer-policy": "no-referrer",
@@ -89,13 +94,13 @@ export function buildApp(
   app.post<{ Body: CreateBody }>(
     "/api/v1/links",
     async (request, reply) => {
-      // Rate limiting runs before authentication so invalid
-      // credentials cannot be guessed without consuming quota.
+      // Rate limiting runs before authentication so
+      // invalid credentials cannot be guessed without
+      // consuming quota.
       if (rateLimiter) {
         try {
-          const result = await rateLimiter.consume(
-            request.ip,
-          );
+          const result =
+            await rateLimiter.consume(request.ip);
 
           reply.headers({
             "rate-limit-limit": String(
@@ -148,14 +153,16 @@ export function buildApp(
           });
       }
 
-      const targetUrl = validHttpUrl(
-        request.body?.url,
-      );
+      const targetUrl = urlPolicy
+        ? await urlPolicy.validate(
+            request.body?.url,
+          )
+        : validHttpUrl(request.body?.url);
 
       if (!targetUrl) {
         return reply.code(400).send({
           error:
-            "url must be a valid http or https URL",
+            "url must be a valid and publicly reachable http or https URL",
         });
       }
 
@@ -172,7 +179,8 @@ export function buildApp(
         });
       }
 
-      const ttl = request.body.expiresInSeconds;
+      const ttl =
+        request.body.expiresInSeconds;
 
       if (
         ttl !== undefined &&
@@ -241,7 +249,9 @@ export function buildApp(
     "/:code",
     async (request, reply) => {
       if (
-        !CODE_PATTERN.test(request.params.code)
+        !CODE_PATTERN.test(
+          request.params.code,
+        )
       ) {
         metrics.miss();
 
@@ -293,7 +303,8 @@ export function buildApp(
         createdAt:
           link.createdAt.toISOString(),
         expiresAt:
-          link.expiresAt?.toISOString() ?? null,
+          link.expiresAt?.toISOString() ??
+          null,
       };
     },
   );
