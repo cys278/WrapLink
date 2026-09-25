@@ -6,13 +6,15 @@
   "scripts": {
     "dev": "tsx watch src/server.ts",
     "build": "tsc -p tsconfig.json",
-    "start": "node dist/src/server.js",
+    "start": "node dist/src/cluster.js",
     "test": "vitest run --exclude 'test/integration/**'",
     "test:integration": "vitest run test/integration --maxWorkers=1 --no-file-parallelism",
     "test:watch": "vitest",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "bench": "autocannon -c 100 -d 15 -p 10 http://localhost:3000/health",
-    "db:migrate": "tsx src/database/migrate.ts"
+    "db:migrate": "tsx src/database/migrate.ts",
+    "start:single": "node dist/src/server.js",
+    "dev:cluster": "node --env-file=.env --watch --import tsx src/cluster.ts"
   },
   "engines": {
     "node": ">=22"
