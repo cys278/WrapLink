@@ -23,7 +23,7 @@ COPY package.json package-lock.json ./
 RUN npm ci --omit=dev && npm cache clean --force
 
 COPY --from=build /app/dist ./dist
-COPY migrations ./migrations
+COPY migrations ./dist/migrations
 
 USER node
 
