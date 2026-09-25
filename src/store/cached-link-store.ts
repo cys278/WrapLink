@@ -96,6 +96,10 @@ export class CachedLinkStore
     return this.source.size();
   }
 
+  async isHealthy(): Promise<boolean> {
+    return this.source.isHealthy();
+  }
+
   private key(code: string): string {
     return `wraplink:link:${code}`;
   }

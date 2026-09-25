@@ -31,12 +31,61 @@ const config = {
 
 let app: FastifyInstance | undefined;
 
+class UnhealthyLinkStore
+  extends MemoryLinkStore
+{
+  override async isHealthy(): Promise<boolean> {
+    return false;
+  }
+}
+
 afterEach(async () => {
   await app?.close();
   app = undefined;
 });
 
 describe("short links", () => {
+  it(
+  "reports ready when the store is healthy",
+  async () => {
+    app = buildApp(
+      config,
+      new MemoryLinkStore(100),
+    );
+
+    const response = await app.inject({
+      method: "GET",
+      url: "/ready",
+    });
+
+    expect(response.statusCode).toBe(200);
+
+    expect(response.json()).toEqual({
+      status: "ready",
+    });
+  },
+);
+
+it(
+  "reports not ready when the store is unhealthy",
+  async () => {
+    app = buildApp(
+      config,
+      new UnhealthyLinkStore(100),
+    );
+
+    const response = await app.inject({
+      method: "GET",
+      url: "/ready",
+    });
+
+    expect(response.statusCode).toBe(503);
+
+    expect(response.json()).toEqual({
+      status: "not_ready",
+    });
+  },
+);
   it(
     "creates, redirects and reports a link",
     async () => {

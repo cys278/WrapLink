@@ -129,4 +129,14 @@ export class PostgresLinkStore
       result.rows[0]?.count ?? 0,
     );
   }
+
+  async isHealthy(): Promise<boolean> {
+    try {
+      await this.pool.query("SELECT 1");
+
+      return true;
+    } catch {
+      return false;
+    }
+  }
 }

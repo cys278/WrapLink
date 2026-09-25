@@ -17,4 +17,5 @@ export interface LinkStore {
   find(code: string): Promise<Link | null>;
   recordClick(code: string): Promise<void>;
   size(): Promise<number>;
+  isHealthy(): Promise<boolean>;
 }

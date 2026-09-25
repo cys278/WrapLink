@@ -80,10 +80,23 @@ export function buildApp(
     status: "ok",
   }));
 
-  app.get("/ready", async () => ({
-    status: "ready",
-    links: await store.size(),
-  }));
+app.get(
+  "/ready",
+  async (_request, reply) => {
+    const healthy =
+      await store.isHealthy();
+
+    if (!healthy) {
+      return reply.code(503).send({
+        status: "not_ready",
+      });
+    }
+
+    return {
+      status: "ready",
+    };
+  },
+);
 
   app.get("/metrics", async (_request, reply) => {
     return reply
