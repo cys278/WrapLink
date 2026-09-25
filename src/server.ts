@@ -2,6 +2,7 @@ import { buildApp } from "./app.js";
 import { createRedisClient } from "./cache/redis-client.js";
 import { loadConfig } from "./config.js";
 import { createDatabasePool } from "./database/pool.js";
+import { HashedApiKeyAuthenticator } from "./security/api-key-authenticator.js";
 import { RedisRateLimiter } from "./security/rate-limiter.js";
 import { CachedLinkStore } from "./store/cached-link-store.js";
 import { PostgresLinkStore } from "./store/postgres-link-store.js";
@@ -27,10 +28,16 @@ const rateLimiter = new RedisRateLimiter(
   config.createRateLimitWindowSeconds,
 );
 
+const apiKeyAuthenticator =
+  new HashedApiKeyAuthenticator(
+    config.createApiKeys,
+  );
+
 const app = buildApp(
   config,
   store,
   rateLimiter,
+  apiKeyAuthenticator,
 );
 
 let shuttingDown = false;
@@ -79,8 +86,8 @@ process.once("SIGTERM", () => {
 });
 
 try {
-  // PostgreSQL is required because it is
-  // the durable source of truth.
+  // PostgreSQL is required because it is the
+  // durable source of truth.
   await pool.query("SELECT 1");
 
   // Redis is optional for redirects because

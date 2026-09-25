@@ -5,6 +5,7 @@ import type { AppConfig } from "./config.js";
 import { generateCode } from "./domain/code.js";
 import type { LinkStore } from "./domain/link.js";
 import { Metrics } from "./metrics.js";
+import type { ApiKeyAuthenticator } from "./security/api-key-authenticator.js";
 import type { RateLimiter } from "./security/rate-limiter.js";
 
 interface CreateBody {
@@ -39,14 +40,11 @@ export function buildApp(
   config: AppConfig,
   store: LinkStore,
   rateLimiter?: RateLimiter,
+  apiKeyAuthenticator?: ApiKeyAuthenticator,
 ): FastifyInstance {
   const app = Fastify({
     logger: { level: config.logLevel },
-
-    // The API accepts only small JSON documents.
     bodyLimit: 16 * 1_024,
-
-    // Reduce exposure to slow-client resource exhaustion.
     requestTimeout: 10_000,
     connectionTimeout: 10_000,
   });
@@ -91,6 +89,8 @@ export function buildApp(
   app.post<{ Body: CreateBody }>(
     "/api/v1/links",
     async (request, reply) => {
+      // Rate limiting runs before authentication so invalid
+      // credentials cannot be guessed without consuming quota.
       if (rateLimiter) {
         try {
           const result = await rateLimiter.consume(
@@ -124,14 +124,28 @@ export function buildApp(
               });
           }
         } catch {
-          // Link creation fails closed when its
-          // abuse protection cannot be enforced.
-          // Redirects remain available.
           return reply.code(503).send({
             error:
               "link creation is temporarily unavailable",
           });
         }
+      }
+
+      if (
+        apiKeyAuthenticator &&
+        !apiKeyAuthenticator.authenticate(
+          request.headers["x-api-key"],
+        )
+      ) {
+        return reply
+          .header(
+            "www-authenticate",
+            'ApiKey realm="link-creation"',
+          )
+          .code(401)
+          .send({
+            error: "valid API key required",
+          });
       }
 
       const targetUrl = validHttpUrl(

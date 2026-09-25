@@ -6,6 +6,7 @@ import {
   it,
 } from "vitest";
 import { buildApp } from "../src/app.js";
+import { HashedApiKeyAuthenticator } from "../src/security/api-key-authenticator.js";
 import type { RateLimiter } from "../src/security/rate-limiter.js";
 import { MemoryLinkStore } from "../src/store/memory-link-store.js";
 
@@ -53,7 +54,6 @@ describe("short links", () => {
       });
 
       expect(created.statusCode).toBe(201);
-
       expect(created.json().shortUrl).toBe(
         "http://sho.rt/docs",
       );
@@ -64,7 +64,6 @@ describe("short links", () => {
       });
 
       expect(redirect.statusCode).toBe(302);
-
       expect(
         redirect.headers.location,
       ).toBe("https://example.com/docs");
@@ -266,6 +265,62 @@ describe("short links", () => {
         error:
           "link creation is temporarily unavailable",
       });
+    },
+  );
+
+  it(
+    "requires a valid API key for link creation",
+    async () => {
+      const authenticator =
+        new HashedApiKeyAuthenticator(
+          config.createApiKeys,
+        );
+
+      app = buildApp(
+        config,
+        new MemoryLinkStore(100),
+        undefined,
+        authenticator,
+      );
+
+      const unauthorized = await app.inject({
+        method: "POST",
+        url: "/api/v1/links",
+        payload: {
+          url: "https://example.com/private",
+          customCode: "private",
+        },
+      });
+
+      expect(
+        unauthorized.statusCode,
+      ).toBe(401);
+
+      expect(
+        unauthorized.headers,
+      ).toMatchObject({
+        "www-authenticate":
+          'ApiKey realm="link-creation"',
+      });
+
+      expect(unauthorized.json()).toEqual({
+        error: "valid API key required",
+      });
+
+      const authorized = await app.inject({
+        method: "POST",
+        url: "/api/v1/links",
+        headers: {
+          "x-api-key":
+            config.createApiKeys[0]!,
+        },
+        payload: {
+          url: "https://example.com/private",
+          customCode: "private",
+        },
+      });
+
+      expect(authorized.statusCode).toBe(201);
     },
   );
 });
