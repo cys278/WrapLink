@@ -10,6 +10,7 @@ import {
 import { Pool } from "pg";
 import { createRedisClient } from "../../src/cache/redis-client.js";
 import { CachedLinkStore } from "../../src/store/cached-link-store.js";
+import { ClickBuffer } from "../../src/store/click-buffer.js";
 import { PostgresLinkStore } from "../../src/store/postgres-link-store.js";
 
 const databaseUrl =
@@ -25,8 +26,13 @@ const pool = new Pool({
   max: 5,
 });
 
-const redis = createRedisClient({ redisUrl });
-const postgres = new PostgresLinkStore(pool);
+const redis = createRedisClient({
+  redisUrl,
+});
+
+const postgres =
+  new PostgresLinkStore(pool);
+
 const store = new CachedLinkStore(
   postgres,
   redis,
@@ -37,10 +43,13 @@ const codes = [
   "cached",
   "fallback",
   "atomic",
+  "buffered",
   "expires",
 ];
 
-function cacheKey(code: string): string {
+function cacheKey(
+  code: string,
+): string {
   return `wraplink:link:${code}`;
 }
 
@@ -49,16 +58,22 @@ beforeAll(async () => {
 });
 
 beforeEach(async () => {
-  await pool.query("TRUNCATE TABLE links");
+  await pool.query(
+    "TRUNCATE TABLE links",
+  );
 
   await Promise.all(
-    codes.map((code) => redis.del(cacheKey(code))),
+    codes.map((code) =>
+      redis.del(cacheKey(code)),
+    ),
   );
 });
 
 afterEach(async () => {
   await Promise.all(
-    codes.map((code) => redis.del(cacheKey(code))),
+    codes.map((code) =>
+      redis.del(cacheKey(code)),
+    ),
   );
 });
 
@@ -71,99 +86,236 @@ afterAll(async () => {
 });
 
 describe("CachedLinkStore", () => {
-  it("populates Redis after creating a link", async () => {
-    await store.create({
-      code: "cached",
-      targetUrl: "https://example.com/cached",
-      expiresAt: null,
-    });
+  it(
+    "populates Redis after creating a link",
+    async () => {
+      await store.create({
+        code: "cached",
+        targetUrl:
+          "https://example.com/cached",
+        expiresAt: null,
+      });
 
-    const cached = await redis.hGetAll(
-      cacheKey("cached"),
-    );
+      const cached =
+        await redis.hGetAll(
+          cacheKey("cached"),
+        );
 
-    expect(cached).toMatchObject({
-      code: "cached",
-      targetUrl: "https://example.com/cached",
-      clicks: "0",
-    });
-  });
+      expect(cached).toMatchObject({
+        code: "cached",
+        targetUrl:
+          "https://example.com/cached",
+        clicks: "0",
+      });
+    },
+  );
 
-  it("serves a cached link without reading PostgreSQL", async () => {
-    const created = await store.create({
-      code: "cached",
-      targetUrl: "https://example.com/cached",
-      expiresAt: null,
-    });
+  it(
+    "serves a cached link without reading PostgreSQL",
+    async () => {
+      const created =
+        await store.create({
+          code: "cached",
+          targetUrl:
+            "https://example.com/cached",
+          expiresAt: null,
+        });
 
-    await pool.query(
-      "DELETE FROM links WHERE code = $1",
-      ["cached"],
-    );
+      await pool.query(
+        "DELETE FROM links WHERE code = $1",
+        ["cached"],
+      );
 
-    expect(await store.find("cached")).toEqual(created);
-  });
+      expect(
+        await store.find("cached"),
+      ).toEqual(created);
+    },
+  );
 
-  it("falls back to PostgreSQL and populates Redis", async () => {
-    await postgres.create({
-      code: "fallback",
-      targetUrl: "https://example.com/fallback",
-      expiresAt: null,
-    });
+  it(
+    "falls back to PostgreSQL and populates Redis",
+    async () => {
+      await postgres.create({
+        code: "fallback",
+        targetUrl:
+          "https://example.com/fallback",
+        expiresAt: null,
+      });
 
-    expect(
-      await redis.exists(cacheKey("fallback")),
-    ).toBe(0);
+      expect(
+        await redis.exists(
+          cacheKey("fallback"),
+        ),
+      ).toBe(0);
 
-    const found = await store.find("fallback");
+      const found =
+        await store.find("fallback");
 
-    expect(found?.targetUrl).toBe(
-      "https://example.com/fallback",
-    );
+      expect(found?.targetUrl).toBe(
+        "https://example.com/fallback",
+      );
 
-    expect(
-      await redis.exists(cacheKey("fallback")),
-    ).toBe(1);
-  });
+      expect(
+        await redis.exists(
+          cacheKey("fallback"),
+        ),
+      ).toBe(1);
+    },
+  );
 
-  it("keeps concurrent click counts synchronized", async () => {
-    await store.create({
-      code: "atomic",
-      targetUrl: "https://example.com/atomic",
-      expiresAt: null,
-    });
+  it(
+    "keeps concurrent click counts synchronized",
+    async () => {
+      await store.create({
+        code: "atomic",
+        targetUrl:
+          "https://example.com/atomic",
+        expiresAt: null,
+      });
 
-    await Promise.all(
-      Array.from(
-        { length: 25 },
-        () => store.recordClick("atomic"),
-      ),
-    );
+      await Promise.all(
+        Array.from(
+          { length: 25 },
+          () =>
+            store.recordClick(
+              "atomic",
+            ),
+        ),
+      );
 
-    expect((await store.find("atomic"))?.clicks).toBe(25);
+      expect(
+        (
+          await store.find("atomic")
+        )?.clicks,
+      ).toBe(25);
 
-    const persisted = await pool.query<{
-      clicks: string;
-    }>(
-      "SELECT clicks FROM links WHERE code = $1",
-      ["atomic"],
-    );
+      const persisted =
+        await pool.query<{
+          clicks: string;
+        }>(
+          `
+            SELECT clicks
+            FROM links
+            WHERE code = $1
+          `,
+          ["atomic"],
+        );
 
-    expect(persisted.rows[0]?.clicks).toBe("25");
-  });
+      expect(
+        persisted.rows[0]?.clicks,
+      ).toBe("25");
+    },
+  );
 
-  it("does not cache beyond the link expiration", async () => {
-    await store.create({
-      code: "expires",
-      targetUrl: "https://example.com/expires",
-      expiresAt: new Date(Date.now() + 5_000),
-    });
+  it(
+    "buffers PostgreSQL writes while updating Redis immediately",
+    async () => {
+      const clickBuffer =
+        new ClickBuffer(
+          postgres,
+          60_000,
+          10_000,
+        );
 
-    const ttl = await redis.ttl(
-      cacheKey("expires"),
-    );
+      const bufferedStore =
+        new CachedLinkStore(
+          postgres,
+          redis,
+          300,
+          clickBuffer,
+        );
 
-    expect(ttl).toBeGreaterThan(0);
-    expect(ttl).toBeLessThanOrEqual(5);
-  });
+      await bufferedStore.create({
+        code: "buffered",
+        targetUrl:
+          "https://example.com/buffered",
+        expiresAt: null,
+      });
+
+      await Promise.all(
+        Array.from(
+          { length: 25 },
+          () =>
+            bufferedStore.recordClick(
+              "buffered",
+            ),
+        ),
+      );
+
+      expect(
+        (
+          await bufferedStore.find(
+            "buffered",
+          )
+        )?.clicks,
+      ).toBe(25);
+
+      const beforeFlush =
+        await pool.query<{
+          clicks: string;
+        }>(
+          `
+            SELECT clicks
+            FROM links
+            WHERE code = $1
+          `,
+          ["buffered"],
+        );
+
+      expect(
+        beforeFlush.rows[0]?.clicks,
+      ).toBe("0");
+
+      expect(
+        clickBuffer.pendingClicks(),
+      ).toBe(25);
+
+      await clickBuffer.flush();
+
+      const afterFlush =
+        await pool.query<{
+          clicks: string;
+        }>(
+          `
+            SELECT clicks
+            FROM links
+            WHERE code = $1
+          `,
+          ["buffered"],
+        );
+
+      expect(
+        afterFlush.rows[0]?.clicks,
+      ).toBe("25");
+
+      expect(
+        clickBuffer.pendingClicks(),
+      ).toBe(0);
+
+      await clickBuffer.close();
+    },
+  );
+
+  it(
+    "does not cache beyond the link expiration",
+    async () => {
+      await store.create({
+        code: "expires",
+        targetUrl:
+          "https://example.com/expires",
+        expiresAt: new Date(
+          Date.now() + 5_000,
+        ),
+      });
+
+      const ttl = await redis.ttl(
+        cacheKey("expires"),
+      );
+
+      expect(ttl).toBeGreaterThan(0);
+      expect(ttl).toBeLessThanOrEqual(
+        5,
+      );
+    },
+  );
 });

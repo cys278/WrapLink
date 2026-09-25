@@ -6,6 +6,7 @@ import { HashedApiKeyAuthenticator } from "./security/api-key-authenticator.js";
 import { RedisRateLimiter } from "./security/rate-limiter.js";
 import { SafeUrlPolicy } from "./security/url-policy.js";
 import { CachedLinkStore } from "./store/cached-link-store.js";
+import { ClickBuffer } from "./store/click-buffer.js";
 import { PostgresLinkStore } from "./store/postgres-link-store.js";
 
 const config = loadConfig();
@@ -13,21 +14,30 @@ const config = loadConfig();
 const pool = createDatabasePool(config);
 const redis = createRedisClient(config);
 
-const postgresStore = new PostgresLinkStore(
-  pool,
+const postgresStore =
+  new PostgresLinkStore(pool);
+
+const clickBuffer = new ClickBuffer(
+  postgresStore,
+  1_000,
+  10_000,
 );
+
+clickBuffer.start();
 
 const store = new CachedLinkStore(
   postgresStore,
   redis,
   config.redisCacheTtlSeconds,
+  clickBuffer,
 );
 
-const rateLimiter = new RedisRateLimiter(
-  redis,
-  config.createRateLimitMax,
-  config.createRateLimitWindowSeconds,
-);
+const rateLimiter =
+  new RedisRateLimiter(
+    redis,
+    config.createRateLimitMax,
+    config.createRateLimitWindowSeconds,
+  );
 
 const apiKeyAuthenticator =
   new HashedApiKeyAuthenticator(
@@ -49,13 +59,17 @@ let shuttingDown = false;
 function disconnectFromPrimary(): void {
   if (
     process.connected &&
-    typeof process.disconnect === "function"
+    typeof process.disconnect ===
+      "function"
   ) {
     process.disconnect();
   }
 }
 
 async function closeResources(): Promise<void> {
+  // Flush clicks before closing the database pool.
+  await clickBuffer.close();
+
   await Promise.all([
     pool.end(),
     redis.isOpen
@@ -79,6 +93,8 @@ async function shutdown(
   );
 
   try {
+    // Stop accepting new requests before
+    // draining buffered click increments.
     await app.close();
     await closeResources();
     process.exitCode = 0;
@@ -90,8 +106,6 @@ async function shutdown(
 
     process.exitCode = 1;
   } finally {
-    // Cluster workers must close their IPC channel
-    // after releasing application resources.
     disconnectFromPrimary();
   }
 }
@@ -105,16 +119,13 @@ process.once("SIGTERM", () => {
 });
 
 try {
-  // PostgreSQL is required because it is the
-  // durable source of truth.
+  // PostgreSQL is the durable source
+  // of truth.
   await pool.query("SELECT 1");
 
-  // Redis is optional for redirects because
-  // they can fall back to PostgreSQL.
-  //
-  // Link creation fails closed if Redis is
-  // unavailable because rate limiting cannot
-  // be enforced safely.
+  // Redis is optional for redirect reads.
+  // Link creation still fails closed when
+  // rate limiting cannot be enforced.
   try {
     await redis.connect();
   } catch (error) {
