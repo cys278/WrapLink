@@ -1,0 +1,7 @@
+services:
+  app:
+    environment:
+      LOG_LEVEL: warn
+      WEB_CONCURRENCY: 2
+    cpus: 2.0
+    mem_limit: 1g
