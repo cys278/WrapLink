@@ -86,6 +86,14 @@ describe("cluster metrics", () => {
 
       expect(
         isWorkerMetricsMessage({
+          type:
+            "metrics:flush-response",
+          requestId: "123:1",
+        }),
+      ).toBe(true);
+
+      expect(
+        isWorkerMetricsMessage({
           type: "metrics:batch",
           snapshot: {
             requests: -1,
@@ -98,12 +106,9 @@ describe("cluster metrics", () => {
 
       expect(
         isWorkerMetricsMessage({
-          type: "metrics:batch",
-          snapshot: {
-            requests: 1,
-            created: 0,
-            redirects: 0,
-          },
+          type:
+            "metrics:flush-response",
+          requestId: 123,
         }),
       ).toBe(false);
 
@@ -114,8 +119,16 @@ describe("cluster metrics", () => {
   );
 
   it(
-    "recognizes primary snapshot messages",
+    "recognizes primary metric messages",
     () => {
+      expect(
+        isPrimaryMetricsMessage({
+          type:
+            "metrics:flush-request",
+          requestId: "123:1",
+        }),
+      ).toBe(true);
+
       expect(
         isPrimaryMetricsMessage({
           type:
@@ -133,14 +146,8 @@ describe("cluster metrics", () => {
       expect(
         isPrimaryMetricsMessage({
           type:
-            "metrics:snapshot-response",
+            "metrics:flush-request",
           requestId: 123,
-          snapshot: {
-            requests: 10,
-            created: 2,
-            redirects: 7,
-            misses: 1,
-          },
         }),
       ).toBe(false);
 

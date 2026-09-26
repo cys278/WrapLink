@@ -5,11 +5,13 @@ import { availableParallelism } from "node:os";
 import {
   isWorkerMetricsMessage,
   MetricsAggregator,
+  type MetricsFlushRequest,
   type MetricsSnapshotResponse,
 } from "./cluster-metrics.js";
 
 const MAX_WORKERS = 32;
 const SHUTDOWN_TIMEOUT_MS = 15_000;
+const METRICS_FLUSH_TIMEOUT_MS = 1_000;
 
 function parseWorkerCount(
   value: string | undefined,
@@ -45,9 +47,143 @@ if (cluster.isPrimary) {
 
   let shuttingDown = false;
 
+  interface PendingSnapshot {
+    requester: Worker;
+    awaitingWorkerIds: Set<number>;
+    timeout: NodeJS.Timeout;
+  }
+
+  const pendingSnapshots =
+    new Map<string, PendingSnapshot>();
+
   console.info(
     `Primary process ${process.pid} starting ${workerCount} workers`,
   );
+
+  function completeSnapshot(
+    requestId: string,
+  ): void {
+    const pending =
+      pendingSnapshots.get(requestId);
+
+    if (!pending) {
+      return;
+    }
+
+    clearTimeout(pending.timeout);
+    pendingSnapshots.delete(requestId);
+
+    if (!pending.requester.isConnected()) {
+      return;
+    }
+
+    const response:
+      MetricsSnapshotResponse = {
+        type: "metrics:snapshot-response",
+        requestId,
+        snapshot: metrics.snapshot(),
+      };
+
+    pending.requester.send(response);
+  }
+
+  function requestWorkerFlushes(
+    requester: Worker,
+    requestId: string,
+  ): void {
+    const workers = Object.values(
+      cluster.workers ?? {},
+    ).filter(
+      (worker): worker is Worker =>
+        worker !== undefined &&
+        worker.isConnected() &&
+        !worker.isDead(),
+    );
+
+    if (workers.length === 0) {
+      const response:
+        MetricsSnapshotResponse = {
+          type:
+            "metrics:snapshot-response",
+          requestId,
+          snapshot: metrics.snapshot(),
+        };
+
+      if (requester.isConnected()) {
+        requester.send(response);
+      }
+
+      return;
+    }
+
+    const awaitingWorkerIds = new Set(
+      workers.map((worker) => worker.id),
+    );
+
+    const timeout = setTimeout(() => {
+      completeSnapshot(requestId);
+    }, METRICS_FLUSH_TIMEOUT_MS);
+
+    timeout.unref();
+
+    pendingSnapshots.set(requestId, {
+      requester,
+      awaitingWorkerIds,
+      timeout,
+    });
+
+    const message: MetricsFlushRequest = {
+      type: "metrics:flush-request",
+      requestId,
+    };
+
+    for (const worker of workers) {
+      worker.send(message);
+    }
+  }
+
+  function acknowledgeWorkerFlush(
+    worker: Worker,
+    requestId: string,
+  ): void {
+    const pending =
+      pendingSnapshots.get(requestId);
+
+    if (!pending) {
+      return;
+    }
+
+    pending.awaitingWorkerIds.delete(
+      worker.id,
+    );
+
+    if (
+      pending.awaitingWorkerIds.size === 0
+    ) {
+      completeSnapshot(requestId);
+    }
+  }
+
+  function removeWorkerFromSnapshots(
+    worker: Worker,
+  ): void {
+    for (
+      const [
+        requestId,
+        pending,
+      ] of pendingSnapshots
+    ) {
+      pending.awaitingWorkerIds.delete(
+        worker.id,
+      );
+
+      if (
+        pending.awaitingWorkerIds.size === 0
+      ) {
+        completeSnapshot(requestId);
+      }
+    }
+  }
 
   function startWorker(): Worker {
     const worker = cluster.fork();
@@ -68,15 +204,22 @@ if (cluster.isPrimary) {
           return;
         }
 
-        const response:
-          MetricsSnapshotResponse = {
-            type:
-              "metrics:snapshot-response",
-            requestId: value.requestId,
-            snapshot: metrics.snapshot(),
-          };
+        if (
+          value.type ===
+          "metrics:flush-response"
+        ) {
+          acknowledgeWorkerFlush(
+            worker,
+            value.requestId,
+          );
 
-        worker.send(response);
+          return;
+        }
+
+        requestWorkerFlushes(
+          worker,
+          value.requestId,
+        );
       },
     );
 
@@ -94,6 +237,8 @@ if (cluster.isPrimary) {
   cluster.on(
     "exit",
     (worker, code, signal) => {
+      removeWorkerFromSnapshots(worker);
+
       console.warn(
         `Worker ${worker.process.pid} exited`,
         {
@@ -118,6 +263,14 @@ if (cluster.isPrimary) {
     console.info(
       `Primary process received ${signal}`,
     );
+
+    for (
+      const pending of pendingSnapshots.values()
+    ) {
+      clearTimeout(pending.timeout);
+    }
+
+    pendingSnapshots.clear();
 
     const workers = Object.values(
       cluster.workers ?? {},

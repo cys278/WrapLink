@@ -20,6 +20,16 @@ export interface MetricsSnapshotRequest {
   requestId: string;
 }
 
+export interface MetricsFlushRequest {
+  type: "metrics:flush-request";
+  requestId: string;
+}
+
+export interface MetricsFlushResponse {
+  type: "metrics:flush-response";
+  requestId: string;
+}
+
 export interface MetricsSnapshotResponse {
   type: "metrics:snapshot-response";
   requestId: string;
@@ -28,10 +38,12 @@ export interface MetricsSnapshotResponse {
 
 export type WorkerMetricsMessage =
   | MetricsBatchMessage
-  | MetricsSnapshotRequest;
+  | MetricsSnapshotRequest
+  | MetricsFlushResponse;
 
 export type PrimaryMetricsMessage =
-  MetricsSnapshotResponse;
+  | MetricsFlushRequest
+  | MetricsSnapshotResponse;
 
 const EMPTY_SNAPSHOT: MetricsSnapshot = {
   requests: 0,
@@ -104,11 +116,16 @@ export function isWorkerMetricsMessage(
     );
   }
 
-  return (
+  if (
     message.type ===
-      "metrics:snapshot-request" &&
-    typeof message.requestId === "string"
-  );
+      "metrics:snapshot-request" ||
+    message.type ===
+      "metrics:flush-response"
+  ) {
+    return typeof message.requestId === "string";
+  }
+
+  return false;
 }
 
 export function isPrimaryMetricsMessage(
@@ -123,6 +140,13 @@ export function isPrimaryMetricsMessage(
 
   const message =
     value as Record<string, unknown>;
+
+  if (
+    message.type ===
+    "metrics:flush-request"
+  ) {
+    return typeof message.requestId === "string";
+  }
 
   return (
     message.type ===
@@ -202,8 +226,6 @@ export class ClusterMetrics
   }
 
   async render(): Promise<string> {
-    this.flush();
-
     const snapshot =
       await this.requestSnapshot();
 
@@ -223,7 +245,9 @@ export class ClusterMetrics
       this.handleMessage,
     );
 
-    for (const pending of this.#pending.values()) {
+    for (
+      const pending of this.#pending.values()
+    ) {
       clearTimeout(pending.timeout);
     }
 
@@ -299,7 +323,8 @@ export class ClusterMetrics
       snapshot.misses;
   }
 
-  private requestSnapshot(): Promise<MetricsSnapshot> {
+  private requestSnapshot():
+    Promise<MetricsSnapshot> {
     if (!process.send) {
       return Promise.resolve(
         emptySnapshot(),
@@ -338,6 +363,26 @@ export class ClusterMetrics
     value: unknown,
   ): void => {
     if (!isPrimaryMetricsMessage(value)) {
+      return;
+    }
+
+    if (
+      value.type ===
+      "metrics:flush-request"
+    ) {
+      // IPC messages from this worker are ordered.
+      // Send the pending batch before acknowledging
+      // the primary's flush request.
+      this.flush();
+
+      const response:
+        MetricsFlushResponse = {
+          type: "metrics:flush-response",
+          requestId: value.requestId,
+        };
+
+      process.send?.(response);
+
       return;
     }
 
