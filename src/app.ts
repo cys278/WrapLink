@@ -57,6 +57,8 @@ export function buildApp(
     connectionTimeout: 10_000,
   });
 
+  const requestStartTimes =
+    new WeakMap<object, bigint>();
 
   app.addHook(
     "onSend",
@@ -75,37 +77,70 @@ export function buildApp(
     },
   );
 
-  app.addHook("onRequest", async () => {
-    metrics.request();
-  });
+  app.addHook(
+    "onRequest",
+    async (request) => {
+      metrics.request();
+
+      requestStartTimes.set(
+        request,
+        process.hrtime.bigint(),
+      );
+    },
+  );
+
+  app.addHook(
+    "onResponse",
+    async (request) => {
+      const startTime =
+        requestStartTimes.get(request);
+
+      if (startTime === undefined) {
+        return;
+      }
+
+      requestStartTimes.delete(request);
+
+      const elapsedNanoseconds =
+        process.hrtime.bigint() - startTime;
+
+      metrics.observeRequestDuration(
+        Number(elapsedNanoseconds) /
+          1_000_000_000,
+      );
+    },
+  );
 
   app.get("/health", async () => ({
     status: "ok",
   }));
 
-app.get(
-  "/ready",
-  async (_request, reply) => {
-    const healthy =
-      await store.isHealthy();
+  app.get(
+    "/ready",
+    async (_request, reply) => {
+      const healthy =
+        await store.isHealthy();
 
-    if (!healthy) {
-      return reply.code(503).send({
-        status: "not_ready",
-      });
-    }
+      if (!healthy) {
+        return reply.code(503).send({
+          status: "not_ready",
+        });
+      }
 
-    return {
-      status: "ready",
-    };
-  },
-);
+      return {
+        status: "ready",
+      };
+    },
+  );
 
-  app.get("/metrics", async (_request, reply) => {
-    return reply
-      .type("text/plain; version=0.0.4")
-      .send(await metrics.render());
-  });
+  app.get(
+    "/metrics",
+    async (_request, reply) => {
+      return reply
+        .type("text/plain; version=0.0.4")
+        .send(await metrics.render());
+    },
+  );
 
   app.post<{ Body: CreateBody }>(
     "/api/v1/links",
@@ -116,7 +151,9 @@ app.get(
       if (rateLimiter) {
         try {
           const result =
-            await rateLimiter.consume(request.ip);
+            await rateLimiter.consume(
+              request.ip,
+            );
 
           reply.headers({
             "rate-limit-limit": String(
@@ -173,7 +210,9 @@ app.get(
         ? await urlPolicy.validate(
             request.body?.url,
           )
-        : validHttpUrl(request.body?.url);
+        : validHttpUrl(
+            request.body?.url,
+          );
 
       if (!targetUrl) {
         return reply.code(400).send({
@@ -182,7 +221,8 @@ app.get(
         });
       }
 
-      const custom = request.body.customCode;
+      const custom =
+        request.body.customCode;
 
       if (
         custom !== undefined &&
@@ -202,7 +242,8 @@ app.get(
         ttl !== undefined &&
         (!Number.isSafeInteger(ttl) ||
           (ttl as number) < 1 ||
-          (ttl as number) > 31_536_000)
+          (ttl as number) >
+            31_536_000)
       ) {
         return reply.code(400).send({
           error:
@@ -228,21 +269,24 @@ app.get(
             ? custom
             : generateCode();
 
-        const link = await store.create({
-          code,
-          targetUrl,
-          expiresAt,
-        });
+        const link =
+          await store.create({
+            code,
+            targetUrl,
+            expiresAt,
+          });
 
         if (link) {
           metrics.created();
 
           return reply.code(201).send({
             code,
-            shortUrl: `${config.baseUrl}/${code}`,
+            shortUrl:
+              `${config.baseUrl}/${code}`,
             targetUrl,
             expiresAt:
-              expiresAt?.toISOString() ?? null,
+              expiresAt?.toISOString() ??
+              null,
           });
         }
 
@@ -261,7 +305,9 @@ app.get(
     },
   );
 
-  app.get<{ Params: { code: string } }>(
+  app.get<{
+    Params: { code: string };
+  }>(
     "/:code",
     async (request, reply) => {
       if (
@@ -288,7 +334,10 @@ app.get(
         });
       }
 
-      await store.recordClick(link.code);
+      await store.recordClick(
+        link.code,
+      );
+
       metrics.redirect();
 
       return reply.redirect(
@@ -298,7 +347,9 @@ app.get(
     },
   );
 
-  app.get<{ Params: { code: string } }>(
+  app.get<{
+    Params: { code: string };
+  }>(
     "/api/v1/links/:code",
     async (request, reply) => {
       const link = await store.find(
@@ -314,7 +365,8 @@ app.get(
       return {
         code: link.code,
         targetUrl: link.targetUrl,
-        shortUrl: `${config.baseUrl}/${link.code}`,
+        shortUrl:
+          `${config.baseUrl}/${link.code}`,
         clicks: link.clicks,
         createdAt:
           link.createdAt.toISOString(),

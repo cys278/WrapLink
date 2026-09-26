@@ -1,5 +1,7 @@
 import {
+  emptyMetricsSnapshot,
   renderMetrics,
+  REQUEST_DURATION_BUCKETS,
   type MetricsCollector,
   type MetricsSnapshot,
 } from "./metrics.js";
@@ -45,17 +47,8 @@ export type PrimaryMetricsMessage =
   | MetricsFlushRequest
   | MetricsSnapshotResponse;
 
-const EMPTY_SNAPSHOT: MetricsSnapshot = {
-  requests: 0,
-  created: 0,
-  redirects: 0,
-  misses: 0,
-};
-
 function emptySnapshot(): MetricsSnapshot {
-  return {
-    ...EMPTY_SNAPSHOT,
-  };
+  return emptyMetricsSnapshot();
 }
 
 function isNonNegativeSafeInteger(
@@ -65,6 +58,48 @@ function isNonNegativeSafeInteger(
     typeof value === "number" &&
     Number.isSafeInteger(value) &&
     value >= 0
+  );
+}
+
+function isNonNegativeFiniteNumber(
+  value: unknown,
+): value is number {
+  return (
+    typeof value === "number" &&
+    Number.isFinite(value) &&
+    value >= 0
+  );
+}
+
+function isRequestDurationSnapshot(
+  value: unknown,
+): value is MetricsSnapshot["requestDuration"] {
+  if (
+    typeof value !== "object" ||
+    value === null
+  ) {
+    return false;
+  }
+
+  const duration =
+    value as Record<string, unknown>;
+
+  if (
+    !Array.isArray(duration.buckets) ||
+    duration.buckets.length !==
+      REQUEST_DURATION_BUCKETS.length ||
+    !isNonNegativeFiniteNumber(
+      duration.sum,
+    ) ||
+    !isNonNegativeSafeInteger(
+      duration.count,
+    )
+  ) {
+    return false;
+  }
+
+  return duration.buckets.every(
+    isNonNegativeSafeInteger,
   );
 }
 
@@ -93,6 +128,9 @@ function isMetricsSnapshot(
     ) &&
     isNonNegativeSafeInteger(
       snapshot.misses,
+    ) &&
+    isRequestDurationSnapshot(
+      snapshot.requestDuration,
     )
   );
 }
@@ -122,7 +160,9 @@ export function isWorkerMetricsMessage(
     message.type ===
       "metrics:flush-response"
   ) {
-    return typeof message.requestId === "string";
+    return (
+      typeof message.requestId === "string"
+    );
   }
 
   return false;
@@ -145,7 +185,9 @@ export function isPrimaryMetricsMessage(
     message.type ===
     "metrics:flush-request"
   ) {
-    return typeof message.requestId === "string";
+    return (
+      typeof message.requestId === "string"
+    );
   }
 
   return (
@@ -156,27 +198,82 @@ export function isPrimaryMetricsMessage(
   );
 }
 
+function addSnapshots(
+  target: MetricsSnapshot,
+  source: MetricsSnapshot,
+): void {
+  target.requests += source.requests;
+  target.created += source.created;
+  target.redirects += source.redirects;
+  target.misses += source.misses;
+
+  target.requestDuration.sum +=
+    source.requestDuration.sum;
+
+  target.requestDuration.count +=
+    source.requestDuration.count;
+
+  for (
+    let index = 0;
+    index <
+    REQUEST_DURATION_BUCKETS.length;
+    index += 1
+  ) {
+    target.requestDuration.buckets[index] =
+      (target.requestDuration.buckets[
+        index
+      ] ?? 0) +
+      (source.requestDuration.buckets[
+        index
+      ] ?? 0);
+  }
+}
+
+function copySnapshot(
+  snapshot: MetricsSnapshot,
+): MetricsSnapshot {
+  return {
+    requests: snapshot.requests,
+    created: snapshot.created,
+    redirects: snapshot.redirects,
+    misses: snapshot.misses,
+    requestDuration: {
+      buckets: [
+        ...snapshot.requestDuration.buckets,
+      ],
+      sum: snapshot.requestDuration.sum,
+      count:
+        snapshot.requestDuration.count,
+    },
+  };
+}
+
+function isEmptySnapshot(
+  snapshot: MetricsSnapshot,
+): boolean {
+  return (
+    snapshot.requests === 0 &&
+    snapshot.created === 0 &&
+    snapshot.redirects === 0 &&
+    snapshot.misses === 0 &&
+    snapshot.requestDuration.count === 0
+  );
+}
+
 export class MetricsAggregator {
   #snapshot = emptySnapshot();
 
   add(snapshot: MetricsSnapshot): void {
-    this.#snapshot.requests +=
-      snapshot.requests;
-
-    this.#snapshot.created +=
-      snapshot.created;
-
-    this.#snapshot.redirects +=
-      snapshot.redirects;
-
-    this.#snapshot.misses +=
-      snapshot.misses;
+    addSnapshots(
+      this.#snapshot,
+      snapshot,
+    );
   }
 
   snapshot(): MetricsSnapshot {
-    return {
-      ...this.#snapshot,
-    };
+    return copySnapshot(
+      this.#snapshot,
+    );
   }
 }
 
@@ -225,6 +322,47 @@ export class ClusterMetrics
     this.increment("misses");
   }
 
+  observeRequestDuration(
+    seconds: number,
+  ): void {
+    if (
+      !Number.isFinite(seconds) ||
+      seconds < 0
+    ) {
+      return;
+    }
+
+    this.#pendingSnapshot.requestDuration
+      .sum += seconds;
+
+    this.#pendingSnapshot.requestDuration
+      .count += 1;
+
+    for (
+      let index = 0;
+      index <
+      REQUEST_DURATION_BUCKETS.length;
+      index += 1
+    ) {
+      const upperBound =
+        REQUEST_DURATION_BUCKETS[index];
+
+      if (
+        upperBound !== undefined &&
+        seconds <= upperBound
+      ) {
+        this.#pendingSnapshot
+          .requestDuration.buckets[index] =
+          (this.#pendingSnapshot
+            .requestDuration.buckets[
+              index
+            ] ?? 0) + 1;
+
+        break;
+      }
+    }
+  }
+
   async render(): Promise<string> {
     const snapshot =
       await this.requestSnapshot();
@@ -262,12 +400,7 @@ export class ClusterMetrics
     const snapshot =
       this.#pendingSnapshot;
 
-    if (
-      snapshot.requests === 0 &&
-      snapshot.created === 0 &&
-      snapshot.redirects === 0 &&
-      snapshot.misses === 0
-    ) {
+    if (isEmptySnapshot(snapshot)) {
       return;
     }
 
@@ -310,17 +443,10 @@ export class ClusterMetrics
   private addSnapshot(
     snapshot: MetricsSnapshot,
   ): void {
-    this.#pendingSnapshot.requests +=
-      snapshot.requests;
-
-    this.#pendingSnapshot.created +=
-      snapshot.created;
-
-    this.#pendingSnapshot.redirects +=
-      snapshot.redirects;
-
-    this.#pendingSnapshot.misses +=
-      snapshot.misses;
+    addSnapshots(
+      this.#pendingSnapshot,
+      snapshot,
+    );
   }
 
   private requestSnapshot():
