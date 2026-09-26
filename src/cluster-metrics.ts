@@ -10,9 +10,9 @@ export type MetricName =
   | "redirects"
   | "misses";
 
-export interface MetricIncrementMessage {
-  type: "metrics:increment";
-  metric: MetricName;
+export interface MetricsBatchMessage {
+  type: "metrics:batch";
+  snapshot: MetricsSnapshot;
 }
 
 export interface MetricsSnapshotRequest {
@@ -27,11 +27,63 @@ export interface MetricsSnapshotResponse {
 }
 
 export type WorkerMetricsMessage =
-  | MetricIncrementMessage
+  | MetricsBatchMessage
   | MetricsSnapshotRequest;
 
 export type PrimaryMetricsMessage =
   MetricsSnapshotResponse;
+
+const EMPTY_SNAPSHOT: MetricsSnapshot = {
+  requests: 0,
+  created: 0,
+  redirects: 0,
+  misses: 0,
+};
+
+function emptySnapshot(): MetricsSnapshot {
+  return {
+    ...EMPTY_SNAPSHOT,
+  };
+}
+
+function isNonNegativeSafeInteger(
+  value: unknown,
+): value is number {
+  return (
+    typeof value === "number" &&
+    Number.isSafeInteger(value) &&
+    value >= 0
+  );
+}
+
+function isMetricsSnapshot(
+  value: unknown,
+): value is MetricsSnapshot {
+  if (
+    typeof value !== "object" ||
+    value === null
+  ) {
+    return false;
+  }
+
+  const snapshot =
+    value as Record<string, unknown>;
+
+  return (
+    isNonNegativeSafeInteger(
+      snapshot.requests,
+    ) &&
+    isNonNegativeSafeInteger(
+      snapshot.created,
+    ) &&
+    isNonNegativeSafeInteger(
+      snapshot.redirects,
+    ) &&
+    isNonNegativeSafeInteger(
+      snapshot.misses,
+    )
+  );
+}
 
 export function isWorkerMetricsMessage(
   value: unknown,
@@ -46,12 +98,9 @@ export function isWorkerMetricsMessage(
   const message =
     value as Record<string, unknown>;
 
-  if (message.type === "metrics:increment") {
-    return (
-      message.metric === "requests" ||
-      message.metric === "created" ||
-      message.metric === "redirects" ||
-      message.metric === "misses"
+  if (message.type === "metrics:batch") {
+    return isMetricsSnapshot(
+      message.snapshot,
     );
   }
 
@@ -79,21 +128,25 @@ export function isPrimaryMetricsMessage(
     message.type ===
       "metrics:snapshot-response" &&
     typeof message.requestId === "string" &&
-    typeof message.snapshot === "object" &&
-    message.snapshot !== null
+    isMetricsSnapshot(message.snapshot)
   );
 }
 
 export class MetricsAggregator {
-  #snapshot: MetricsSnapshot = {
-    requests: 0,
-    created: 0,
-    redirects: 0,
-    misses: 0,
-  };
+  #snapshot = emptySnapshot();
 
-  increment(metric: MetricName): void {
-    this.#snapshot[metric] += 1;
+  add(snapshot: MetricsSnapshot): void {
+    this.#snapshot.requests +=
+      snapshot.requests;
+
+    this.#snapshot.created +=
+      snapshot.created;
+
+    this.#snapshot.redirects +=
+      snapshot.redirects;
+
+    this.#snapshot.misses +=
+      snapshot.misses;
   }
 
   snapshot(): MetricsSnapshot {
@@ -116,15 +169,20 @@ export class ClusterMetrics
   readonly #pending =
     new Map<string, PendingRequest>();
 
+  #pendingSnapshot = emptySnapshot();
   #nextRequestId = 0;
+  #flushTimer: NodeJS.Timeout | undefined;
 
   constructor(
     private readonly timeoutMs = 1_000,
+    private readonly flushIntervalMs = 1_000,
   ) {
     process.on(
       "message",
       this.handleMessage,
     );
+
+    this.startFlushTimer();
   }
 
   request(): void {
@@ -144,6 +202,8 @@ export class ClusterMetrics
   }
 
   async render(): Promise<string> {
+    this.flush();
+
     const snapshot =
       await this.requestSnapshot();
 
@@ -151,6 +211,13 @@ export class ClusterMetrics
   }
 
   close(): void {
+    if (this.#flushTimer) {
+      clearInterval(this.#flushTimer);
+      this.#flushTimer = undefined;
+    }
+
+    this.flush();
+
     process.off(
       "message",
       this.handleMessage,
@@ -163,29 +230,80 @@ export class ClusterMetrics
     this.#pending.clear();
   }
 
-  private increment(
-    metric: MetricName,
-  ): void {
+  flush(): void {
     if (!process.send) {
       return;
     }
 
-    const message: MetricIncrementMessage = {
-      type: "metrics:increment",
-      metric,
+    const snapshot =
+      this.#pendingSnapshot;
+
+    if (
+      snapshot.requests === 0 &&
+      snapshot.created === 0 &&
+      snapshot.redirects === 0 &&
+      snapshot.misses === 0
+    ) {
+      return;
+    }
+
+    this.#pendingSnapshot =
+      emptySnapshot();
+
+    const message: MetricsBatchMessage = {
+      type: "metrics:batch",
+      snapshot,
     };
 
-    process.send(message);
+    try {
+      process.send(message);
+    } catch {
+      this.addSnapshot(snapshot);
+    }
+  }
+
+  private startFlushTimer(): void {
+    if (!process.send) {
+      return;
+    }
+
+    this.#flushTimer = setInterval(
+      () => {
+        this.flush();
+      },
+      this.flushIntervalMs,
+    );
+
+    this.#flushTimer.unref();
+  }
+
+  private increment(
+    metric: MetricName,
+  ): void {
+    this.#pendingSnapshot[metric] += 1;
+  }
+
+  private addSnapshot(
+    snapshot: MetricsSnapshot,
+  ): void {
+    this.#pendingSnapshot.requests +=
+      snapshot.requests;
+
+    this.#pendingSnapshot.created +=
+      snapshot.created;
+
+    this.#pendingSnapshot.redirects +=
+      snapshot.redirects;
+
+    this.#pendingSnapshot.misses +=
+      snapshot.misses;
   }
 
   private requestSnapshot(): Promise<MetricsSnapshot> {
     if (!process.send) {
-      return Promise.resolve({
-        requests: 0,
-        created: 0,
-        redirects: 0,
-        misses: 0,
-      });
+      return Promise.resolve(
+        emptySnapshot(),
+      );
     }
 
     this.#nextRequestId += 1;
@@ -197,12 +315,7 @@ export class ClusterMetrics
       const timeout = setTimeout(() => {
         this.#pending.delete(requestId);
 
-        resolve({
-          requests: 0,
-          created: 0,
-          redirects: 0,
-          misses: 0,
-        });
+        resolve(emptySnapshot());
       }, this.timeoutMs);
 
       timeout.unref();

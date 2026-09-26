@@ -12,23 +12,30 @@ import {
 
 describe("cluster metrics", () => {
   it(
-    "aggregates metric increments",
+    "aggregates metric batches",
     () => {
       const metrics =
         new MetricsAggregator();
 
-      metrics.increment("requests");
-      metrics.increment("requests");
-      metrics.increment("created");
-      metrics.increment("redirects");
-      metrics.increment("redirects");
-      metrics.increment("misses");
+      metrics.add({
+        requests: 100,
+        created: 2,
+        redirects: 90,
+        misses: 8,
+      });
+
+      metrics.add({
+        requests: 50,
+        created: 1,
+        redirects: 40,
+        misses: 10,
+      });
 
       expect(metrics.snapshot()).toEqual({
-        requests: 2,
-        created: 1,
-        redirects: 2,
-        misses: 1,
+        requests: 150,
+        created: 3,
+        redirects: 130,
+        misses: 18,
       });
     },
   );
@@ -39,7 +46,12 @@ describe("cluster metrics", () => {
       const metrics =
         new MetricsAggregator();
 
-      metrics.increment("requests");
+      metrics.add({
+        requests: 1,
+        created: 0,
+        redirects: 0,
+        misses: 0,
+      });
 
       const first = metrics.snapshot();
       const second = metrics.snapshot();
@@ -54,8 +66,13 @@ describe("cluster metrics", () => {
     () => {
       expect(
         isWorkerMetricsMessage({
-          type: "metrics:increment",
-          metric: "redirects",
+          type: "metrics:batch",
+          snapshot: {
+            requests: 100,
+            created: 2,
+            redirects: 90,
+            misses: 8,
+          },
         }),
       ).toBe(true);
 
@@ -69,8 +86,24 @@ describe("cluster metrics", () => {
 
       expect(
         isWorkerMetricsMessage({
-          type: "metrics:increment",
-          metric: "unknown",
+          type: "metrics:batch",
+          snapshot: {
+            requests: -1,
+            created: 0,
+            redirects: 0,
+            misses: 0,
+          },
+        }),
+      ).toBe(false);
+
+      expect(
+        isWorkerMetricsMessage({
+          type: "metrics:batch",
+          snapshot: {
+            requests: 1,
+            created: 0,
+            redirects: 0,
+          },
         }),
       ).toBe(false);
 
@@ -102,7 +135,26 @@ describe("cluster metrics", () => {
           type:
             "metrics:snapshot-response",
           requestId: 123,
-          snapshot: {},
+          snapshot: {
+            requests: 10,
+            created: 2,
+            redirects: 7,
+            misses: 1,
+          },
+        }),
+      ).toBe(false);
+
+      expect(
+        isPrimaryMetricsMessage({
+          type:
+            "metrics:snapshot-response",
+          requestId: "123:1",
+          snapshot: {
+            requests: 10,
+            created: 2,
+            redirects: 7,
+            misses: -1,
+          },
         }),
       ).toBe(false);
     },

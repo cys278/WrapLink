@@ -63,11 +63,8 @@ if (cluster.isPrimary) {
           return;
         }
 
-        if (
-          value.type ===
-          "metrics:increment"
-        ) {
-          metrics.increment(value.metric);
+        if (value.type === "metrics:batch") {
+          metrics.add(value.snapshot);
           return;
         }
 
