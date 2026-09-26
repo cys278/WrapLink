@@ -90,6 +90,9 @@ if (preflight.status !== expectedStatus) {
 console.info(`Profile: ${profileName}`);
 console.info(`Target: ${target}`);
 console.info(
+  `Expected status: ${expectedStatus}`,
+);
+console.info(
   `Connections: ${profile.connections}`,
 );
 console.info(
@@ -113,10 +116,15 @@ const timestamp = new Date()
 
 const cpu = cpus()[0];
 
+const successfulRun =
+  result.errors === 0 &&
+  result.timeouts === 0;
+
 const report = {
   benchmark: {
     profile: profileName,
     target,
+    expectedStatus,
     ...profile,
     timestamp: new Date().toISOString(),
   },
@@ -148,6 +156,8 @@ const report = {
     timeouts: result.timeouts,
     status2xx: result["2xx"],
     statusNon2xx: result.non2xx,
+    expectedStatus,
+    successfulRun,
   },
   result,
 };
@@ -183,7 +193,25 @@ console.info(
 );
 console.info(`Errors: ${result.errors}`);
 console.info(`Timeouts: ${result.timeouts}`);
+
+if (expectedStatus >= 300) {
+  console.info(
+    `Non-2xx responses: ${result.non2xx} (expected for HTTP ${expectedStatus} benchmark target)`,
+  );
+} else {
+  console.info(
+    `Non-2xx responses: ${result.non2xx}`,
+  );
+}
+
 console.info(
-  `Non-2xx responses: ${result.non2xx}`,
+  `Preflight status: ${expectedStatus} ✓`,
 );
+
+console.info(
+  `Transport success: ${
+    successfulRun ? "yes" : "no"
+  }`,
+);
+
 console.info(`Report: ${outputPath}`);
