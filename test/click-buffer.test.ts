@@ -13,12 +13,12 @@ describe("ClickBuffer", () => {
   it(
     "combines clicks for each link",
     async () => {
-      const recordClicks = vi.fn(
+      const recordClickBatch = vi.fn(
         async () => undefined,
       );
 
       const sink: BatchedClickSink = {
-        recordClicks,
+        recordClickBatch,
       };
 
       const buffer = new ClickBuffer(
@@ -36,27 +36,22 @@ describe("ClickBuffer", () => {
       ).toBe(5);
 
       expect(
-        recordClicks,
+        recordClickBatch,
       ).not.toHaveBeenCalled();
 
       await buffer.flush();
 
       expect(
-        recordClicks,
-      ).toHaveBeenCalledTimes(2);
+        recordClickBatch,
+      ).toHaveBeenCalledTimes(1);
 
       expect(
-        recordClicks,
+        recordClickBatch,
       ).toHaveBeenCalledWith(
-        "docs",
-        3,
-      );
-
-      expect(
-        recordClicks,
-      ).toHaveBeenCalledWith(
-        "home",
-        2,
+        new Map([
+          ["docs", 3],
+          ["home", 2],
+        ]),
       );
 
       expect(
@@ -68,18 +63,18 @@ describe("ClickBuffer", () => {
   it(
     "does not write when the buffer is empty",
     async () => {
-      const recordClicks = vi.fn(
+      const recordClickBatch = vi.fn(
         async () => undefined,
       );
 
       const buffer = new ClickBuffer({
-        recordClicks,
+        recordClickBatch,
       });
 
       await buffer.flush();
 
       expect(
-        recordClicks,
+        recordClickBatch,
       ).not.toHaveBeenCalled();
     },
   );
@@ -89,7 +84,7 @@ describe("ClickBuffer", () => {
     async () => {
       let shouldFail = true;
 
-      const recordClicks = vi.fn(
+      const recordClickBatch = vi.fn(
         async () => {
           if (shouldFail) {
             throw new Error(
@@ -100,7 +95,7 @@ describe("ClickBuffer", () => {
       );
 
       const buffer = new ClickBuffer({
-        recordClicks,
+        recordClickBatch,
       });
 
       buffer.record("retry");
@@ -126,10 +121,11 @@ describe("ClickBuffer", () => {
       ).toBe(0);
 
       expect(
-        recordClicks,
+        recordClickBatch,
       ).toHaveBeenLastCalledWith(
-        "retry",
-        3,
+        new Map([
+          ["retry", 3],
+        ]),
       );
     },
   );
@@ -137,12 +133,12 @@ describe("ClickBuffer", () => {
   it(
     "flushes remaining clicks when closed",
     async () => {
-      const recordClicks = vi.fn(
+      const recordClickBatch = vi.fn(
         async () => undefined,
       );
 
       const buffer = new ClickBuffer({
-        recordClicks,
+        recordClickBatch,
       });
 
       buffer.record("shutdown");
@@ -151,10 +147,11 @@ describe("ClickBuffer", () => {
       await buffer.close();
 
       expect(
-        recordClicks,
+        recordClickBatch,
       ).toHaveBeenCalledWith(
-        "shutdown",
-        2,
+        new Map([
+          ["shutdown", 2],
+        ]),
       );
 
       expect(

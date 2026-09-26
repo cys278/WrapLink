@@ -160,6 +160,77 @@ describe("PostgresLinkStore", () => {
   );
 
   it(
+    "increments multiple links in one batch",
+    async () => {
+      await store.create({
+        code: "alpha",
+        targetUrl:
+          "https://example.com/alpha",
+        expiresAt: null,
+      });
+
+      await store.create({
+        code: "bravo",
+        targetUrl:
+          "https://example.com/bravo",
+        expiresAt: null,
+      });
+
+      await store.create({
+        code: "charlie",
+        targetUrl:
+          "https://example.com/charlie",
+        expiresAt: null,
+      });
+
+      await store.recordClickBatch(
+        new Map([
+          ["alpha", 3],
+          ["bravo", 7],
+          ["charlie", 11],
+        ]),
+      );
+
+      expect(
+        (await store.find("alpha"))?.clicks,
+      ).toBe(3);
+
+      expect(
+        (await store.find("bravo"))?.clicks,
+      ).toBe(7);
+
+      expect(
+        (await store.find("charlie"))?.clicks,
+      ).toBe(11);
+    },
+  );
+
+  it(
+    "rejects invalid click batches",
+    async () => {
+      await expect(
+        store.recordClickBatch(
+          new Map([
+            ["docs", 0],
+          ]),
+        ),
+      ).rejects.toThrow(
+        "click count must be a positive integer",
+      );
+
+      await expect(
+        store.recordClickBatch(
+          new Map([
+            ["docs", 1.5],
+          ]),
+        ),
+      ).rejects.toThrow(
+        "click count must be a positive integer",
+      );
+    },
+  );
+
+  it(
     "rejects invalid batched click counts",
     async () => {
       await expect(

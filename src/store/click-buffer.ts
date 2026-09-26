@@ -1,7 +1,6 @@
 export interface BatchedClickSink {
-  recordClicks(
-    code: string,
-    count: number,
+  recordClickBatch(
+    clicks: ReadonlyMap<string, number>,
   ): Promise<void>;
 }
 
@@ -164,15 +163,8 @@ export class ClickBuffer {
     this.pendingTotal = 0;
 
     try {
-      await Promise.all(
-        Array.from(
-          batch,
-          ([code, count]) =>
-            this.sink.recordClicks(
-              code,
-              count,
-            ),
-        ),
+      await this.sink.recordClickBatch(
+        batch,
       );
     } catch (error) {
       for (const [code, count] of batch) {

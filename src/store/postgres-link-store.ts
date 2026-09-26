@@ -118,6 +118,50 @@ export class PostgresLinkStore
     );
   }
 
+  async recordClickBatch(
+    clicks: ReadonlyMap<string, number>,
+  ): Promise<void> {
+    if (clicks.size === 0) {
+      return;
+    }
+
+    const codes: string[] = [];
+    const counts: number[] = [];
+
+    for (const [code, count] of clicks) {
+      if (
+        !Number.isSafeInteger(count) ||
+        count < 1
+      ) {
+        throw new Error(
+          "click count must be a positive integer",
+        );
+      }
+
+      codes.push(code);
+      counts.push(count);
+    }
+
+    await this.pool.query(
+      `
+        UPDATE links AS link
+        SET clicks =
+          link.clicks + batch.count
+        FROM (
+          SELECT
+            code,
+            count
+          FROM UNNEST(
+            $1::text[],
+            $2::bigint[]
+          ) AS values(code, count)
+        ) AS batch
+        WHERE link.code = batch.code
+      `,
+      [codes, counts],
+    );
+  }
+
   async size(): Promise<number> {
     const result = await this.pool.query<{
       count: string;
