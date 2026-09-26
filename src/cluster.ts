@@ -2,6 +2,11 @@ import cluster, {
   type Worker,
 } from "node:cluster";
 import { availableParallelism } from "node:os";
+import {
+  isWorkerMetricsMessage,
+  MetricsAggregator,
+  type MetricsSnapshotResponse,
+} from "./cluster-metrics.js";
 
 const MAX_WORKERS = 32;
 const SHUTDOWN_TIMEOUT_MS = 15_000;
@@ -35,6 +40,9 @@ if (cluster.isPrimary) {
     process.env.WEB_CONCURRENCY,
   );
 
+  const metrics =
+    new MetricsAggregator();
+
   let shuttingDown = false;
 
   console.info(
@@ -46,6 +54,33 @@ if (cluster.isPrimary) {
 
     console.info(
       `Started worker ${worker.process.pid}`,
+    );
+
+    worker.on(
+      "message",
+      (value: unknown) => {
+        if (!isWorkerMetricsMessage(value)) {
+          return;
+        }
+
+        if (
+          value.type ===
+          "metrics:increment"
+        ) {
+          metrics.increment(value.metric);
+          return;
+        }
+
+        const response:
+          MetricsSnapshotResponse = {
+            type:
+              "metrics:snapshot-response",
+            requestId: value.requestId,
+            snapshot: metrics.snapshot(),
+          };
+
+        worker.send(response);
+      },
     );
 
     return worker;
@@ -88,8 +123,8 @@ if (cluster.isPrimary) {
     );
 
     const workers = Object.values(
-  cluster.workers ?? {},
-).filter(
+      cluster.workers ?? {},
+    ).filter(
       (worker): worker is Worker =>
         worker !== undefined,
     );
@@ -118,13 +153,14 @@ if (cluster.isPrimary) {
     }
 
     cluster.on("exit", () => {
-      const remainingWorkers = Object.values(
-  cluster.workers ?? {},
-).some(
-        (worker) =>
-          worker !== undefined &&
-          !worker.isDead(),
-      );
+      const remainingWorkers =
+        Object.values(
+          cluster.workers ?? {},
+        ).some(
+          (worker) =>
+            worker !== undefined &&
+            !worker.isDead(),
+        );
 
       if (!remainingWorkers) {
         clearTimeout(forceShutdown);

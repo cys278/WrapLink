@@ -4,7 +4,10 @@ import Fastify, {
 import type { AppConfig } from "./config.js";
 import { generateCode } from "./domain/code.js";
 import type { LinkStore } from "./domain/link.js";
-import { Metrics } from "./metrics.js";
+import {
+  Metrics,
+  type MetricsCollector,
+} from "./metrics.js";
 import type { ApiKeyAuthenticator } from "./security/api-key-authenticator.js";
 import type { RateLimiter } from "./security/rate-limiter.js";
 import type { UrlPolicy } from "./security/url-policy.js";
@@ -45,7 +48,7 @@ export function buildApp(
   rateLimiter?: RateLimiter,
   apiKeyAuthenticator?: ApiKeyAuthenticator,
   urlPolicy?: UrlPolicy,
-  metrics: Metrics = new Metrics(),
+  metrics: MetricsCollector = new Metrics(),
 ): FastifyInstance {
   const app = Fastify({
     logger: { level: config.logLevel },
@@ -101,7 +104,7 @@ app.get(
   app.get("/metrics", async (_request, reply) => {
     return reply
       .type("text/plain; version=0.0.4")
-      .send(metrics.render());
+      .send(await metrics.render());
   });
 
   app.post<{ Body: CreateBody }>(
