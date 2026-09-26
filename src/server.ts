@@ -2,6 +2,7 @@ import { buildApp } from "./app.js";
 import { createRedisClient } from "./cache/redis-client.js";
 import { loadConfig } from "./config.js";
 import { createDatabasePool } from "./database/pool.js";
+import { Metrics } from "./metrics.js";
 import { HashedApiKeyAuthenticator } from "./security/api-key-authenticator.js";
 import { RedisRateLimiter } from "./security/rate-limiter.js";
 import { SafeUrlPolicy } from "./security/url-policy.js";
@@ -45,6 +46,7 @@ const apiKeyAuthenticator =
   );
 
 const urlPolicy = new SafeUrlPolicy();
+const metrics = new Metrics();
 
 const app = buildApp(
   config,
@@ -52,6 +54,7 @@ const app = buildApp(
   rateLimiter,
   apiKeyAuthenticator,
   urlPolicy,
+  metrics,
 );
 
 let shuttingDown = false;

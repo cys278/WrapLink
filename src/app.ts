@@ -45,6 +45,7 @@ export function buildApp(
   rateLimiter?: RateLimiter,
   apiKeyAuthenticator?: ApiKeyAuthenticator,
   urlPolicy?: UrlPolicy,
+  metrics: Metrics = new Metrics(),
 ): FastifyInstance {
   const app = Fastify({
     logger: { level: config.logLevel },
@@ -53,7 +54,6 @@ export function buildApp(
     connectionTimeout: 10_000,
   });
 
-  const metrics = new Metrics();
 
   app.addHook(
     "onSend",

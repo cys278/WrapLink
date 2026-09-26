@@ -8,6 +8,7 @@ import {
 import { buildApp } from "../src/app.js";
 import { HashedApiKeyAuthenticator } from "../src/security/api-key-authenticator.js";
 import type { RateLimiter } from "../src/security/rate-limiter.js";
+import { Metrics } from "../src/metrics.js";
 import { SafeUrlPolicy } from "../src/security/url-policy.js";
 import { MemoryLinkStore } from "../src/store/memory-link-store.js";
 
@@ -45,6 +46,38 @@ afterEach(async () => {
 });
 
 describe("short links", () => {
+  it(
+  "uses an injected metrics collector",
+  async () => {
+    const metrics = new Metrics();
+
+    app = buildApp(
+      config,
+      new MemoryLinkStore(100),
+      undefined,
+      undefined,
+      undefined,
+      metrics,
+    );
+
+    await app.inject({
+      method: "GET",
+      url: "/health",
+    });
+
+    const response = await app.inject({
+      method: "GET",
+      url: "/metrics",
+    });
+
+    expect(response.statusCode).toBe(200);
+
+    expect(response.body).toContain(
+      "shortener_http_requests_total 2",
+    );
+  },
+);
+
   it(
   "reports ready when the store is healthy",
   async () => {
