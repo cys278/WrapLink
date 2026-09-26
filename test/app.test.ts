@@ -1,4 +1,5 @@
 import type { FastifyInstance } from "fastify";
+
 import {
   afterEach,
   describe,
@@ -47,98 +48,142 @@ afterEach(async () => {
 
 describe("short links", () => {
   it(
-  "uses an injected metrics collector",
-  async () => {
-    const metrics = new Metrics();
+    "uses an injected metrics collector",
+    async () => {
+      const metrics = new Metrics();
 
-    app = buildApp(
-      config,
-      new MemoryLinkStore(100),
-      undefined,
-      undefined,
-      undefined,
-      metrics,
-    );
+      app = buildApp(
+        config,
+        new MemoryLinkStore(100),
+        undefined,
+        undefined,
+        undefined,
+        metrics,
+      );
 
-    await app.inject({
-      method: "GET",
-      url: "/health",
-    });
+      await app.inject({
+        method: "GET",
+        url: "/health",
+      });
 
-    const response = await app.inject({
-      method: "GET",
-      url: "/metrics",
-    });
+      const response = await app.inject({
+        method: "GET",
+        url: "/metrics",
+      });
 
-    expect(response.statusCode).toBe(200);
+      expect(response.statusCode).toBe(200);
 
-    expect(response.body).toContain(
-      "shortener_http_requests_total 2",
-    );
+      /*
+       * /metrics is rendered before its own onResponse
+       * hook runs, so the response body is expected to
+       * contain the already-completed /health request.
+       */
+      expect(response.body).toContain(
+        'shortener_http_requests_total{method="GET",route="/health",status_code="200"} 1',
+      );
 
-    const snapshot = metrics.snapshot();
+      const snapshot = metrics.snapshot();
 
-    expect(
-      snapshot.requestDuration.count,
-    ).toBe(2);
+      const healthSeries =
+        snapshot.httpRequests.find(
+          (series) =>
+            series.method === "GET" &&
+            series.route === "/health" &&
+            series.statusCode === 200,
+        );
 
-    expect(
-      snapshot.requestDuration.sum,
-    ).toBeGreaterThanOrEqual(0);
+      const metricsSeries =
+        snapshot.httpRequests.find(
+          (series) =>
+            series.method === "GET" &&
+            series.route === "/metrics" &&
+            series.statusCode === 200,
+        );
 
-    expect(
-      snapshot.requestDuration.buckets.reduce(
-        (total, count) =>
-          total + count,
-        0,
-      ),
-    ).toBeLessThanOrEqual(
-      snapshot.requestDuration.count,
-    );
-  },
-);
+      expect(healthSeries).toBeDefined();
+
+      expect(
+        healthSeries?.requests,
+      ).toBe(1);
+
+      expect(
+        healthSeries?.requestDuration.count,
+      ).toBe(1);
+
+      expect(
+        healthSeries?.requestDuration.sum,
+      ).toBeGreaterThanOrEqual(0);
+
+      expect(
+        healthSeries?.requestDuration.buckets.reduce(
+          (total, count) =>
+            total + count,
+          0,
+        ),
+      ).toBeLessThanOrEqual(
+        healthSeries?.requestDuration.count ??
+          0,
+      );
+
+      /*
+       * Once app.inject() has completed, /metrics has
+       * reached onResponse and therefore appears in the
+       * collector snapshot too.
+       */
+      expect(metricsSeries).toBeDefined();
+
+      expect(
+        metricsSeries?.requests,
+      ).toBe(1);
+
+      expect(
+        metricsSeries?.requestDuration.count,
+      ).toBe(1);
+    },
+  );
 
   it(
-  "reports ready when the store is healthy",
-  async () => {
-    app = buildApp(
-      config,
-      new MemoryLinkStore(100),
-    );
+    "reports ready when the store is healthy",
+    async () => {
+      app = buildApp(
+        config,
+        new MemoryLinkStore(100),
+      );
 
-    const response = await app.inject({
-      method: "GET",
-      url: "/ready",
-    });
+      const response = await app.inject({
+        method: "GET",
+        url: "/ready",
+      });
 
-    expect(response.statusCode).toBe(200);
+      expect(response.statusCode).toBe(200);
 
-    expect(response.json()).toEqual({
-      status: "ready",
-    });
-  },
-);
+      expect(response.json()).toEqual({
+        status: "ready",
+      });
+    },
+  );
 
-it(
-  "reports not ready when the store is unhealthy",
-  async () => {
-    app = buildApp(
-      config,
-      new UnhealthyLinkStore(100),
-    );
+  it(
+    "reports not ready when the store is unhealthy",
+    async () => {
+      app = buildApp(
+        config,
+        new UnhealthyLinkStore(100),
+      );
 
-    const response = await app.inject({
-      method: "GET",
-      url: "/ready",
-    });
+      const response = await app.inject({
+        method: "GET",
+        url: "/ready",
+      });
 
-    expect(response.statusCode).toBe(503);
+      expect(response.statusCode).toBe(503);
 
-    expect(response.json()).toEqual({
-      status: "not_ready",
-    });
-  },
-);
+      expect(response.json()).toEqual({
+        status: "not_ready",
+      });
+    },
+  );
+
   it(
     "creates, redirects and reports a link",
     async () => {
@@ -298,46 +343,49 @@ it(
     },
   );
 
-  it("rate limits link creation", async () => {
-    const rateLimiter: RateLimiter = {
-      async consume() {
-        return {
-          allowed: false,
-          limit: 2,
-          remaining: 0,
-          retryAfterSeconds: 30,
-        };
-      },
-    };
+  it(
+    "rate limits link creation",
+    async () => {
+      const rateLimiter: RateLimiter = {
+        async consume() {
+          return {
+            allowed: false,
+            limit: 2,
+            remaining: 0,
+            retryAfterSeconds: 30,
+          };
+        },
+      };
 
-    app = buildApp(
-      config,
-      new MemoryLinkStore(100),
-      rateLimiter,
-    );
+      app = buildApp(
+        config,
+        new MemoryLinkStore(100),
+        rateLimiter,
+      );
 
-    const response = await app.inject({
-      method: "POST",
-      url: "/api/v1/links",
-      payload: {
-        url: "https://example.com",
-      },
-    });
+      const response = await app.inject({
+        method: "POST",
+        url: "/api/v1/links",
+        payload: {
+          url: "https://example.com",
+        },
+      });
 
-    expect(response.statusCode).toBe(429);
+      expect(response.statusCode).toBe(429);
 
-    expect(response.json()).toEqual({
-      error:
-        "link creation rate limit exceeded",
-    });
+      expect(response.json()).toEqual({
+        error:
+          "link creation rate limit exceeded",
+      });
 
-    expect(response.headers).toMatchObject({
-      "rate-limit-limit": "2",
-      "rate-limit-remaining": "0",
-      "rate-limit-reset": "30",
-      "retry-after": "30",
-    });
-  });
+      expect(response.headers).toMatchObject({
+        "rate-limit-limit": "2",
+        "rate-limit-remaining": "0",
+        "rate-limit-reset": "30",
+        "retry-after": "30",
+      });
+    },
+  );
 
   it(
     "fails closed when rate limiting is unavailable",

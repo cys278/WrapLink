@@ -10,23 +10,62 @@ import {
 
 describe("metrics", () => {
   it(
-    "records counters",
+    "records HTTP request metrics by method, route, and status code",
     () => {
       const metrics = new Metrics();
 
-      metrics.request();
-      metrics.request();
+      metrics.request(
+        "GET",
+        "/health",
+        200,
+        0.001,
+      );
+
+      metrics.request(
+        "GET",
+        "/health",
+        200,
+        0.002,
+      );
+
+      metrics.request(
+        "POST",
+        "/api/v1/links",
+        201,
+        0.01,
+      );
+
       metrics.created();
       metrics.redirect();
       metrics.redirect();
       metrics.miss();
 
-      expect(metrics.snapshot()).toMatchObject({
-        requests: 2,
-        created: 1,
-        redirects: 2,
-        misses: 1,
-      });
+      const snapshot = metrics.snapshot();
+
+      expect(snapshot.created).toBe(1);
+      expect(snapshot.redirects).toBe(2);
+      expect(snapshot.misses).toBe(1);
+
+      expect(snapshot.httpRequests).toHaveLength(
+        2,
+      );
+
+      expect(snapshot.httpRequests).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            method: "GET",
+            route: "/health",
+            statusCode: 200,
+            requests: 2,
+          }),
+          expect.objectContaining({
+            method: "POST",
+            route: "/api/v1/links",
+            statusCode: 201,
+            requests: 1,
+          }),
+        ]),
+      );
     },
   );
 
@@ -35,30 +74,52 @@ describe("metrics", () => {
     () => {
       const metrics = new Metrics();
 
-      metrics.observeRequestDuration(0.001);
-      metrics.observeRequestDuration(0.02);
-      metrics.observeRequestDuration(0.4);
+      metrics.request(
+        "GET",
+        "/health",
+        200,
+        0.001,
+      );
+
+      metrics.request(
+        "GET",
+        "/health",
+        200,
+        0.02,
+      );
+
+      metrics.request(
+        "GET",
+        "/health",
+        200,
+        0.4,
+      );
 
       const snapshot = metrics.snapshot();
 
+      const series =
+        snapshot.httpRequests[0];
+
+      expect(series).toBeDefined();
+
       expect(
-        snapshot.requestDuration.count,
+        series!.requestDuration.count,
       ).toBe(3);
 
       expect(
-        snapshot.requestDuration.sum,
+        series!.requestDuration.sum,
       ).toBeCloseTo(0.421);
 
       expect(
-        snapshot.requestDuration.buckets[0],
+        series!.requestDuration.buckets[0],
       ).toBe(1);
 
       expect(
-        snapshot.requestDuration.buckets[2],
+        series!.requestDuration.buckets[2],
       ).toBe(1);
 
       expect(
-        snapshot.requestDuration.buckets[6],
+        series!.requestDuration.buckets[6],
       ).toBe(1);
     },
   );
@@ -68,28 +129,48 @@ describe("metrics", () => {
     () => {
       const metrics = new Metrics();
 
-      metrics.observeRequestDuration(0.005);
-      metrics.observeRequestDuration(0.01);
-      metrics.observeRequestDuration(10);
+      metrics.request(
+        "GET",
+        "/health",
+        200,
+        0.005,
+      );
 
-      const snapshot = metrics.snapshot();
+      metrics.request(
+        "GET",
+        "/health",
+        200,
+        0.01,
+      );
+
+      metrics.request(
+        "GET",
+        "/health",
+        200,
+        10,
+      );
+
+      const series =
+        metrics.snapshot().httpRequests[0];
+
+      expect(series).toBeDefined();
 
       expect(
-        snapshot.requestDuration.buckets[0],
+        series!.requestDuration.buckets[0],
       ).toBe(1);
 
       expect(
-        snapshot.requestDuration.buckets[1],
+        series!.requestDuration.buckets[1],
       ).toBe(1);
 
       expect(
-        snapshot.requestDuration.buckets[
+        series!.requestDuration.buckets[
           REQUEST_DURATION_BUCKETS.length - 1
         ],
       ).toBe(1);
 
       expect(
-        snapshot.requestDuration.count,
+        series!.requestDuration.count,
       ).toBe(3);
     },
   );
@@ -99,12 +180,20 @@ describe("metrics", () => {
     () => {
       const metrics = new Metrics();
 
-      metrics.observeRequestDuration(20);
+      metrics.request(
+        "GET",
+        "/health",
+        200,
+        20,
+      );
 
-      const snapshot = metrics.snapshot();
+      const series =
+        metrics.snapshot().httpRequests[0];
+
+      expect(series).toBeDefined();
 
       expect(
-        snapshot.requestDuration.buckets,
+        series!.requestDuration.buckets,
       ).toEqual(
         REQUEST_DURATION_BUCKETS.map(
           () => 0,
@@ -112,87 +201,222 @@ describe("metrics", () => {
       );
 
       expect(
-        snapshot.requestDuration.sum,
+        series!.requestDuration.sum,
       ).toBe(20);
 
       expect(
-        snapshot.requestDuration.count,
+        series!.requestDuration.count,
       ).toBe(1);
     },
   );
 
   it(
-    "ignores invalid request durations",
+    "keeps different HTTP label combinations separate",
     () => {
       const metrics = new Metrics();
 
-      metrics.observeRequestDuration(-1);
-      metrics.observeRequestDuration(
-        Number.NaN,
+      metrics.request(
+        "GET",
+        "/:code",
+        302,
+        0.01,
       );
-      metrics.observeRequestDuration(
-        Number.POSITIVE_INFINITY,
+
+      metrics.request(
+        "GET",
+        "/:code",
+        404,
+        0.02,
+      );
+
+      metrics.request(
+        "POST",
+        "/api/v1/links",
+        201,
+        0.03,
       );
 
       const snapshot = metrics.snapshot();
 
-      expect(
-        snapshot.requestDuration.count,
-      ).toBe(0);
+      expect(snapshot.httpRequests).toHaveLength(
+        3,
+      );
 
-      expect(
-        snapshot.requestDuration.sum,
-      ).toBe(0);
-
-      expect(
-        snapshot.requestDuration.buckets,
-      ).toEqual(
-        REQUEST_DURATION_BUCKETS.map(
-          () => 0,
-        ),
+      expect(snapshot.httpRequests).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            method: "GET",
+            route: "/:code",
+            statusCode: 302,
+            requests: 1,
+          }),
+          expect.objectContaining({
+            method: "GET",
+            route: "/:code",
+            statusCode: 404,
+            requests: 1,
+          }),
+          expect.objectContaining({
+            method: "POST",
+            route: "/api/v1/links",
+            statusCode: 201,
+            requests: 1,
+          }),
+        ]),
       );
     },
   );
 
   it(
-    "renders cumulative Prometheus histogram buckets",
+    "ignores invalid HTTP request metrics",
+    () => {
+      const metrics = new Metrics();
+
+      metrics.request(
+        "",
+        "/health",
+        200,
+        0.001,
+      );
+
+      metrics.request(
+        "GET",
+        "",
+        200,
+        0.001,
+      );
+
+      metrics.request(
+        "GET",
+        "/health",
+        99,
+        0.001,
+      );
+
+      metrics.request(
+        "GET",
+        "/health",
+        600,
+        0.001,
+      );
+
+      metrics.request(
+        "GET",
+        "/health",
+        200,
+        -1,
+      );
+
+      metrics.request(
+        "GET",
+        "/health",
+        200,
+        Number.NaN,
+      );
+
+      metrics.request(
+        "GET",
+        "/health",
+        200,
+        Number.POSITIVE_INFINITY,
+      );
+
+      expect(
+        metrics.snapshot().httpRequests,
+      ).toEqual([]);
+    },
+  );
+
+  it(
+    "renders labeled cumulative Prometheus histogram buckets",
     async () => {
       const metrics = new Metrics();
 
-      metrics.observeRequestDuration(0.001);
-      metrics.observeRequestDuration(0.02);
-      metrics.observeRequestDuration(0.4);
-      metrics.observeRequestDuration(20);
+      metrics.request(
+        "GET",
+        "/health",
+        200,
+        0.001,
+      );
+
+      metrics.request(
+        "GET",
+        "/health",
+        200,
+        0.02,
+      );
+
+      metrics.request(
+        "GET",
+        "/health",
+        200,
+        0.4,
+      );
+
+      metrics.request(
+        "GET",
+        "/health",
+        200,
+        20,
+      );
+
+      const rendered =
+        await metrics.render();
+
+      const labels =
+        'method="GET",route="/health",status_code="200"';
+
+      expect(rendered).toContain(
+        `shortener_http_requests_total{${labels}} 4`,
+      );
+
+      expect(rendered).toContain(
+        `shortener_http_request_duration_seconds_bucket{${labels},le="0.005"} 1`,
+      );
+
+      expect(rendered).toContain(
+        `shortener_http_request_duration_seconds_bucket{${labels},le="0.025"} 2`,
+      );
+
+      expect(rendered).toContain(
+        `shortener_http_request_duration_seconds_bucket{${labels},le="0.5"} 3`,
+      );
+
+      expect(rendered).toContain(
+        `shortener_http_request_duration_seconds_bucket{${labels},le="10"} 3`,
+      );
+
+      expect(rendered).toContain(
+        `shortener_http_request_duration_seconds_bucket{${labels},le="+Inf"} 4`,
+      );
+
+      expect(rendered).toContain(
+        `shortener_http_request_duration_seconds_count{${labels}} 4`,
+      );
+
+      expect(rendered).toContain(
+        `shortener_http_request_duration_seconds_sum{${labels}} 20.421`,
+      );
+    },
+  );
+
+  it(
+    "escapes Prometheus label values",
+    async () => {
+      const metrics = new Metrics();
+
+      metrics.request(
+        "GET",
+        '/test/"quoted"\\path',
+        200,
+        0.001,
+      );
 
       const rendered =
         await metrics.render();
 
       expect(rendered).toContain(
-        'shortener_http_request_duration_seconds_bucket{le="0.005"} 1',
-      );
-
-      expect(rendered).toContain(
-        'shortener_http_request_duration_seconds_bucket{le="0.025"} 2',
-      );
-
-      expect(rendered).toContain(
-        'shortener_http_request_duration_seconds_bucket{le="0.5"} 3',
-      );
-
-      expect(rendered).toContain(
-        'shortener_http_request_duration_seconds_bucket{le="10"} 3',
-      );
-
-      expect(rendered).toContain(
-        'shortener_http_request_duration_seconds_bucket{le="+Inf"} 4',
-      );
-
-      expect(rendered).toContain(
-        "shortener_http_request_duration_seconds_count 4",
-      );
-
-      expect(rendered).toContain(
-        "shortener_http_request_duration_seconds_sum 20.421",
+        'route="/test/\\"quoted\\"\\\\path"',
       );
     },
   );
@@ -202,8 +426,12 @@ describe("metrics", () => {
     () => {
       const metrics = new Metrics();
 
-      metrics.request();
-      metrics.observeRequestDuration(0.001);
+      metrics.request(
+        "GET",
+        "/health",
+        200,
+        0.001,
+      );
 
       const first = metrics.snapshot();
       const second = metrics.snapshot();
@@ -211,16 +439,30 @@ describe("metrics", () => {
       expect(first).toEqual(second);
       expect(first).not.toBe(second);
 
-      expect(
-        first.requestDuration,
-      ).not.toBe(
-        second.requestDuration,
+      expect(first.httpRequests).not.toBe(
+        second.httpRequests,
       );
 
       expect(
-        first.requestDuration.buckets,
+        first.httpRequests[0],
       ).not.toBe(
-        second.requestDuration.buckets,
+        second.httpRequests[0],
+      );
+
+      expect(
+        first.httpRequests[0]!
+          .requestDuration,
+      ).not.toBe(
+        second.httpRequests[0]!
+          .requestDuration,
+      );
+
+      expect(
+        first.httpRequests[0]!
+          .requestDuration.buckets,
+      ).not.toBe(
+        second.httpRequests[0]!
+          .requestDuration.buckets,
       );
     },
   );

@@ -1,6 +1,7 @@
 import Fastify, {
   type FastifyInstance,
 } from "fastify";
+
 import type { AppConfig } from "./config.js";
 import { generateCode } from "./domain/code.js";
 import type { LinkStore } from "./domain/link.js";
@@ -32,6 +33,7 @@ function validHttpUrl(
 
   try {
     const url = new URL(value);
+
     const validProtocol =
       url.protocol === "http:" ||
       url.protocol === "https:";
@@ -80,8 +82,6 @@ export function buildApp(
   app.addHook(
     "onRequest",
     async (request) => {
-      metrics.request();
-
       requestStartTimes.set(
         request,
         process.hrtime.bigint(),
@@ -91,7 +91,7 @@ export function buildApp(
 
   app.addHook(
     "onResponse",
-    async (request) => {
+    async (request, reply) => {
       const startTime =
         requestStartTimes.get(request);
 
@@ -104,7 +104,14 @@ export function buildApp(
       const elapsedNanoseconds =
         process.hrtime.bigint() - startTime;
 
-      metrics.observeRequestDuration(
+      const route =
+        request.routeOptions.url ??
+        "unknown";
+
+      metrics.request(
+        request.method,
+        route,
+        reply.statusCode,
         Number(elapsedNanoseconds) /
           1_000_000_000,
       );
