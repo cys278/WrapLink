@@ -28,6 +28,7 @@ const pool = new Pool({
 
 const redis = createRedisClient({
   redisUrl,
+  redisClusterUrls: [],
 });
 
 const postgres =

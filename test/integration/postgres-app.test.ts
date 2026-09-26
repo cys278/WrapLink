@@ -22,6 +22,7 @@ const config = {
   databaseUrl,
   databasePoolMax: 5,
   redisUrl: "redis://127.0.0.1:6379",
+  redisClusterUrls: [],
   redisCacheTtlSeconds: 300,
   createRateLimitMax: 20,
   createRateLimitWindowSeconds: 60,

@@ -7,6 +7,7 @@ export interface AppConfig {
   databaseUrl: string;
   databasePoolMax: number;
   redisUrl: string;
+  redisClusterUrls: readonly string[];
   redisCacheTtlSeconds: number;
   createRateLimitMax: number;
   createRateLimitWindowSeconds: number;
@@ -91,6 +92,13 @@ export function loadConfig(): AppConfig {
     redisUrl:
       process.env.REDIS_URL ??
       "redis://127.0.0.1:6379",
+
+    redisClusterUrls:
+      process.env.REDIS_CLUSTER_URLS
+        ?.split(",")
+        .map((value) => value.trim())
+        .filter((value) => value.length > 0) ??
+      [],
 
     redisCacheTtlSeconds: integer(
       "REDIS_CACHE_TTL_SECONDS",
