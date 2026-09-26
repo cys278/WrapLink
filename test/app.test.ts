@@ -75,6 +75,26 @@ describe("short links", () => {
     expect(response.body).toContain(
       "shortener_http_requests_total 2",
     );
+
+    const snapshot = metrics.snapshot();
+
+    expect(
+      snapshot.requestDuration.count,
+    ).toBe(2);
+
+    expect(
+      snapshot.requestDuration.sum,
+    ).toBeGreaterThanOrEqual(0);
+
+    expect(
+      snapshot.requestDuration.buckets.reduce(
+        (total, count) =>
+          total + count,
+        0,
+      ),
+    ).toBeLessThanOrEqual(
+      snapshot.requestDuration.count,
+    );
   },
 );
 
