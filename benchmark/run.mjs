@@ -30,9 +30,9 @@ const profiles = {
 const profileName =
   process.argv[2] ?? "smoke";
 
-const profile = profiles[profileName];
+const selectedProfile = profiles[profileName];
 
-if (!profile) {
+if (!selectedProfile) {
   console.error(
     `Unknown profile "${profileName}". Use: ${Object.keys(
       profiles,
@@ -41,6 +41,31 @@ if (!profile) {
 
   process.exit(1);
 }
+
+const connectionOverride =
+  process.env.BENCHMARK_CONNECTIONS;
+
+const connections =
+  connectionOverride === undefined
+    ? selectedProfile.connections
+    : Number.parseInt(
+        connectionOverride,
+        10,
+      );
+
+if (
+  !Number.isSafeInteger(connections) ||
+  connections < 1
+) {
+  throw new Error(
+    "BENCHMARK_CONNECTIONS must be a positive integer",
+  );
+}
+
+const profile = {
+  ...selectedProfile,
+  connections,
+};
 
 const baseUrl =
   process.env.BENCHMARK_BASE_URL ??

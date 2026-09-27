@@ -1,4 +1,5 @@
 import Fastify, {
+  LogController,
   type FastifyInstance,
 } from "fastify";
 
@@ -54,6 +55,9 @@ export function buildApp(
 ): FastifyInstance {
   const app = Fastify({
     logger: { level: config.logLevel },
+    logController: new LogController({
+      disableRequestLogging: true,
+    }),
     bodyLimit: 16 * 1_024,
     requestTimeout: 10_000,
     connectionTimeout: 10_000,
