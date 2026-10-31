@@ -9,7 +9,9 @@ import {
   type MetricsSnapshotResponse,
 } from "./cluster-metrics.js";
 
-const MAX_WORKERS = 32;
+// Large instances have 128-192 cores. The real ceiling is usually the
+// PostgreSQL connection budget, which is checked below.
+const MAX_WORKERS = 512;
 const SHUTDOWN_TIMEOUT_MS = 15_000;
 const METRICS_FLUSH_TIMEOUT_MS = 1_000;
 
@@ -59,6 +61,34 @@ if (cluster.isPrimary) {
   console.info(
     `Primary process ${process.pid} starting ${workerCount} workers`,
   );
+
+  // Every worker owns its own PostgreSQL pool. 128 workers with a pool of
+  // 10 means up to 1,280 server connections, which exhausts most databases
+  // long before CPU does.
+  const poolMax = Number.parseInt(
+    process.env.DATABASE_POOL_MAX ?? "20",
+    10,
+  );
+
+  if (Number.isSafeInteger(poolMax) && poolMax > 0) {
+    const budget = workerCount * poolMax;
+
+    console.info(
+      `PostgreSQL connection budget: ${workerCount} workers x ` +
+        `${poolMax} = ${budget} connections`,
+    );
+
+    if (budget > 500) {
+      console.warn(
+        "Connection budget exceeds 500. Check max_connections on " +
+          "PostgreSQL, lower DATABASE_POOL_MAX, or add PgBouncer.",
+      );
+    }
+  }
+
+  // Each worker keeps a stable index so it owns the same write-behind
+  // shards across restarts.
+  const workerIndexes = new Map<number, number>();
 
   function completeSnapshot(
     requestId: string,
@@ -185,8 +215,13 @@ if (cluster.isPrimary) {
     }
   }
 
-  function startWorker(): Worker {
-    const worker = cluster.fork();
+  function startWorker(index: number): Worker {
+    const worker = cluster.fork({
+      WRAPLINK_WORKER_INDEX: String(index),
+      WRAPLINK_WORKER_COUNT: String(workerCount),
+    });
+
+    workerIndexes.set(worker.id, index);
 
     console.info(
       `Started worker ${worker.process.pid}`,
@@ -231,7 +266,7 @@ if (cluster.isPrimary) {
     index < workerCount;
     index += 1
   ) {
-    startWorker();
+    startWorker(index);
   }
 
   cluster.on(
@@ -247,8 +282,13 @@ if (cluster.isPrimary) {
         },
       );
 
+      const index =
+        workerIndexes.get(worker.id) ?? 0;
+
+      workerIndexes.delete(worker.id);
+
       if (!shuttingDown) {
-        startWorker();
+        startWorker(index);
       }
     },
   );

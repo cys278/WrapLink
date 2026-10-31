@@ -1,3 +1,4 @@
+import { linkKey } from "../cache/keys.js";
 import type { RedisClient } from "../cache/redis-client.js";
 import type {
   CreateLinkInput,
@@ -101,7 +102,7 @@ export class CachedLinkStore
   }
 
   private key(code: string): string {
-    return `wraplink:link:${code}`;
+    return linkKey(code);
   }
 
   private async cacheSafely(

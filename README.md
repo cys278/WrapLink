@@ -1,439 +1,240 @@
 # WrapLink
 
-WrapLink is a production-minded URL shortener and performance-engineering lab. It demonstrates how a backend service evolves from in-memory storage into a persistent, cached, observable, and performance-tested system.
+WrapLink is a production-minded URL shortener and a performance-engineering lab. It shows how a backend evolves from a simple persistent API into a system designed to approach **one million requests per second**: cached, clustered, write-behind, observable, failure-tested, and with an optional C++ hot path.
 
-The project currently uses TypeScript, Fastify, PostgreSQL, and Redis. Future milestones will explore security, horizontal scaling, observability, load testing, and an optimized C++ redirect service.
+Stack: TypeScript, Fastify, PostgreSQL 17, Redis 7 (standalone or Cluster), Node.js cluster mode, and C++17 with Drogon and RapidJSON.
 
-## Current capabilities
+## Capabilities
 
+**API and security**
 - Fastify API with strict TypeScript
-- Cryptographically generated, unbiased Base62 codes
-- Custom aliases and optional link expiration
-- Persistent link storage with PostgreSQL
-- Versioned, transactional database migrations
-- Redis cache-aside link resolution
-- Atomic click-count updates in PostgreSQL and Redis
-- Graceful PostgreSQL fallback when Redis is unavailable
-- PostgreSQL connection pooling
-- Expiration-aware cache TTLs
-- Collision detection and input validation
-- Graceful application shutdown
-- Health, readiness, and Prometheus-style metrics endpoints
-- Unit, PostgreSQL, Redis, cache, and end-to-end API tests
-- Repeatable AutoCannon benchmark command
+- Hashed, constant-time API key authentication for link creation
+- Redis rate limiting that fails closed
+- SSRF-safe destination policy (DNS-resolved private-range blocking)
+- Security headers, request size and time limits, `x-request-id` propagation
+- Custom aliases and expiring links
 
-## Architecture
+**Performance**
+- Redis cache-aside redirects with PostgreSQL fallback
+- Write-behind click counting in batched `UPDATE`s, with retries for links not yet synced
+- **Write-behind link creation**: links acknowledged from Redis and synced to PostgreSQL in batches by a crash-safe, idempotent worker with backpressure
+- **Collision-free short codes**: PostgreSQL-reserved ID blocks through a keyed Feistel permutation
+- **Redis Cluster-safe key layout** with hash-tagged shards, optional replica reads
+- Multi-process cluster runtime (up to 512 workers) with stable shard ownership and a connection-budget check
+- O(1) table-size estimates, keyset pagination, no O(n) work on request paths
+- **C++ Drogon + RapidJSON redirect service** sharing the same cache and tables
 
-PostgreSQL is WrapLink's durable source of truth. Redis accelerates frequently accessed links through a cache-aside strategy.
+**Operations**
+- Prometheus metrics aggregated across workers, plus a provisioned Grafana dashboard
+- Versioned, transactional, lock-protected migrations
+- `sync` and `cache:warm` maintenance jobs
+- Failure-injection drills, Linux tuning, live resource monitor
+- Benchmark profiles and a **distributed load-test fleet** with synchronized start and result aggregation
+- CI: typecheck, unit tests, PostgreSQL/Redis integration tests, C++ core tests, Docker build
 
-```text
-Client request
-      |
-      v
- Fastify API
-      |
-      v
- Redis cache -------- cache hit --------> Link response
-      |
-   cache miss
-      |
-      v
- PostgreSQL
-      |
-      v
- Populate Redis
-      |
-      v
- Link response
-```
-
-When Redis is unavailable, WrapLink falls back to PostgreSQL instead of failing the request. PostgreSQL is required during startup because it owns the authoritative link data.
-
-## Technology stack
-
-- Node.js 22+
-- TypeScript
-- Fastify
-- PostgreSQL 17
-- Redis 7
-- Vitest
-- Docker Compose
-- AutoCannon
-
-## Requirements
-
-Install the following before running WrapLink:
-
-- Node.js 22 or newer
-- npm
-- Docker Desktop
-- Git
-
-## Run locally
-
-Clone the repository:
+## Quick start
 
 ```bash
 git clone https://github.com/cys278/WrapLink.git
 cd WrapLink
-```
-
-Install dependencies:
-
-```bash
 npm install
-```
 
-Start PostgreSQL and Redis:
+cp .env.example .env
+# Set CREATE_API_KEYS to the output of: openssl rand -hex 32
 
-```bash
 docker compose up -d postgres redis
-```
-
-Confirm that both services are healthy:
-
-```bash
-docker compose ps
-```
-
-Apply database migrations:
-
-```bash
 npm run db:migrate
+npm run dev            # http://localhost:3000
 ```
 
-Start the development server:
+The Docker PostgreSQL service uses host port `55432` to avoid conflicts with a local PostgreSQL on `5432`.
+
+Run the whole stack in containers instead:
 
 ```bash
-npm run dev
+docker compose up -d --build
 ```
 
-The API will be available at:
-
-```text
-http://localhost:3000
-```
-
-## Environment variables
-
-Copy `.env.example` to `.env` if you want to override the defaults.
-
-```env
-HOST=0.0.0.0
-PORT=3000
-BASE_URL=http://localhost:3000
-LOG_LEVEL=info
-MAX_LINKS=100000
-
-DATABASE_URL=postgresql://shortener:shortener@127.0.0.1:55432/shortener
-DATABASE_POOL_MAX=20
-
-REDIS_URL=redis://127.0.0.1:6379
-REDIS_CACHE_TTL_SECONDS=300
-```
-
-The Docker PostgreSQL service uses host port `55432` to avoid conflicts with PostgreSQL installations already using port `5432`.
-
-Never commit a real `.env` file.
-
-## Create a short link
-
-Create a link with a custom alias:
+## Using the API
 
 ```bash
+API_KEY="$(sed -n 's/^CREATE_API_KEYS=//p' .env | cut -d, -f1)"
+
 curl -i -X POST http://localhost:3000/api/v1/links \
   -H "content-type: application/json" \
-  -d '{
-    "url": "https://example.com/docs",
-    "customCode": "docs"
-  }'
+  -H "x-api-key: $API_KEY" \
+  -d '{"url":"https://example.com/docs","customCode":"docs","expiresInSeconds":3600}'
+
+curl -i http://localhost:3000/docs                 # 302 redirect
+curl    http://localhost:3000/api/v1/links/docs    # statistics
 ```
-
-Example response:
-
-```json
-{
-  "code": "docs",
-  "shortUrl": "http://localhost:3000/docs",
-  "targetUrl": "https://example.com/docs",
-  "expiresAt": null
-}
-```
-
-Open the short URL:
-
-```text
-http://localhost:3000/docs
-```
-
-WrapLink will respond with an HTTP `302` redirect to the target URL.
-
-## Create an expiring link
-
-```bash
-curl -i -X POST http://localhost:3000/api/v1/links \
-  -H "content-type: application/json" \
-  -d '{
-    "url": "https://example.com/temporary",
-    "customCode": "temporary",
-    "expiresInSeconds": 3600
-  }'
-```
-
-The Redis cache entry will never outlive the link's actual expiration time.
-
-## Inspect link statistics
-
-```bash
-curl http://localhost:3000/api/v1/links/docs
-```
-
-Example response:
-
-```json
-{
-  "code": "docs",
-  "targetUrl": "https://example.com/docs",
-  "shortUrl": "http://localhost:3000/docs",
-  "clicks": 1,
-  "createdAt": "2026-09-22T00:00:00.000Z",
-  "expiresAt": null
-}
-```
-
-## API
 
 | Method | Path | Purpose |
 | --- | --- | --- |
-| `POST` | `/api/v1/links` | Create a short link |
+| `POST` | `/api/v1/links` | Create a short link (requires `x-api-key`) |
 | `GET` | `/:code` | Redirect to the target URL |
-| `GET` | `/api/v1/links/:code` | Read link statistics |
-| `GET` | `/health` | Check whether the application is alive |
-| `GET` | `/ready` | Check application and storage readiness |
-| `GET` | `/metrics` | Read Prometheus-style service counters |
+| `GET` | `/api/v1/links/:code` | Link statistics |
+| `GET` | `/health` | Liveness |
+| `GET` | `/ready` | Readiness (PostgreSQL reachable) |
+| `GET` | `/metrics` | Prometheus metrics |
 
-## Health and readiness
+## Write-behind mode
 
-Check liveness:
-
-```bash
-curl http://localhost:3000/health
-```
-
-Example:
-
-```json
-{
-  "status": "ok"
-}
-```
-
-Check readiness:
+Synchronous mode inserts every link into PostgreSQL before responding. That caps creation at the database's single-row write rate. Write-behind mode acknowledges generated links from Redis in one atomic step and lets a background worker insert them in large batches:
 
 ```bash
-curl http://localhost:3000/ready
+# .env
+LINK_WRITE_MODE=write-behind
+CODE_SCRAMBLE_SECRET=<openssl rand -hex 32>   # never change once links exist
 ```
-
-Example:
-
-```json
-{
-  "status": "ready",
-  "links": 1
-}
-```
-
-Inspect metrics:
 
 ```bash
-curl http://localhost:3000/metrics
+docker compose -f docker-compose.yml -f docker-compose.write-behind.yml up -d --build
 ```
 
-## Database migrations
-
-Apply every pending migration:
+Custom aliases still go straight to PostgreSQL. If Redis is unavailable or the backlog limit is reached, creation falls back to a synchronous insert. Read [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full design, the durability trade-off, and the birthday-paradox analysis behind the code generator.
 
 ```bash
-npm run db:migrate
+npm run sync                         # drain all queues now
+npm run sync -- --dead-letters       # inspect collisions and bad records
+npm run cache:warm -- --ttl 0        # load PostgreSQL links into Redis
 ```
 
-Migrations are:
+## Scaling Redis
 
-- applied alphabetically
-- recorded in `schema_migrations`
-- executed inside transactions
-- protected by a PostgreSQL advisory lock
-- safe to run repeatedly
-
-Inspect the database tables:
+A single Redis process is single-threaded (about 100–200k ops/s). Run a cluster:
 
 ```bash
-docker compose exec postgres \
-  psql -U shortener -d shortener -c "\dt"
+npm run redis:cluster -- setup                       # 15 masters + 15 replicas
+npm run redis:cluster -- setup --masters 3 --replicas 0
+npm run redis:cluster -- urls                        # prints REDIS_CLUSTER_URLS=...
 ```
 
-Inspect migration history:
+Set `REDIS_CLUSTER_URLS` and, optionally, `REDIS_CLUSTER_USE_REPLICAS=true`.
+
+## C++ redirect service
 
 ```bash
-docker compose exec postgres \
-  psql -U shortener -d shortener \
-  -c "SELECT filename, applied_at FROM schema_migrations;"
+docker compose -f docker-compose.yml -f docker-compose.cpp.yml up -d --build
+curl -i http://localhost:5555/docs
 ```
 
-Do not run `docker compose down -v` unless you intentionally want to delete all local database data.
+See [cpp-redirect/README.md](cpp-redirect/README.md).
+
+## Observability
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.observability.yml up -d
+```
+
+Grafana at http://localhost:3001 (admin/admin) has a provisioned **WrapLink** dashboard covering request rates, latency percentiles, redirects, the write-behind pipeline, sync backlog and problems, click buffers, and table size. On benchmark hosts, `scripts/monitor.sh` prints CPU idle, network Gbit/s and memory once per second.
 
 ## Testing
 
-Run fast unit tests:
-
 ```bash
-npm test
-```
-
-Run PostgreSQL and Redis integration tests:
-
-```bash
-npm run test:integration
-```
-
-Run strict TypeScript validation:
-
-```bash
-npm run typecheck
-```
-
-Create the production build:
-
-```bash
-npm run build
-```
-
-Run the complete verification sequence:
-
-```bash
-npm test
-npm run test:integration
+npm test                    # unit tests
+npm run db:migrate
+npm run test:integration    # needs PostgreSQL and Redis (truncates the links table)
 npm run typecheck
 npm run build
+npm run test:cpp            # C++ core tests (needs g++)
+API_KEY=... npm run chaos   # failure drills against the Compose stack
 ```
 
-Integration tests truncate the local development `links` table. Never run them against a production database.
+Never run integration tests or chaos drills against a production database.
 
-## Production build
-
-Build the TypeScript source:
+## Benchmarking
 
 ```bash
-npm run build
+npm run build && npm start             # terminal 1
+npm run bench                          # terminal 2: baseline redirect profile
+npm run bench:saturation
+BENCHMARK_API_KEY=$API_KEY npm run bench:create   # raise CREATE_RATE_LIMIT_MAX first
+BENCHMARK_WORKERS=8 BENCHMARK_CONNECTIONS=1000 npm run bench
 ```
 
-Start the compiled server:
+The runner prints in-flight concurrency (connections × pipelining) and throughput in Gbit/s, so you can tell a CPU limit from a network limit.
 
-```bash
-npm start
-```
+For multi-machine tests, see `benchmark/distributed/`. `tester.mjs` runs on each load generator with a synchronized `--start-at`. `ssm-run.sh` (AWS Systems Manager) or `ssh-fleet.sh` fans it out, and `aggregate.mjs` combines results into total requests, RPS, data moved, errors and start skew. Apply `sudo scripts/tune-linux.sh` on every host first.
 
-## Benchmark responsibly
+When publishing results, record hardware, OS, Node.js version, duration, connections, pipelining, payload, throughput, latency percentiles, errors and the exact command. Existing local results are in [benchmark/RESULTS.md](benchmark/RESULTS.md).
 
-Start the production build in one terminal:
+## Configuration
 
-```bash
-npm run build
-npm start
-```
+All settings are documented in [.env.example](.env.example). The most important:
 
-Run the baseline benchmark in another terminal:
+| Variable | Default | Notes |
+| --- | --- | --- |
+| `CREATE_API_KEYS` | required | Comma-separated, 32+ characters each |
+| `LINK_WRITE_MODE` | `sync` | `sync` or `write-behind` |
+| `CODE_SCRAMBLE_SECRET` | | Required for write-behind; never rotate |
+| `WEB_CONCURRENCY` | CPU cores | Worker processes (max 512) |
+| `DATABASE_POOL_MAX` | `20` | Per worker |
+| `REDIS_CLUSTER_URLS` | | Enables Redis Cluster |
+| `TRUST_PROXY` | `false` | `true` only behind a proxy you control |
+| `WRITE_BEHIND_MAX_PENDING` | `1000000` | Backlog bound before falling back to sync |
 
-```bash
-npm run bench
-```
+## Documentation
 
-When publishing benchmark results, record:
-
-- CPU model
-- physical and logical core counts
-- memory
-- operating system
-- Node.js version
-- test duration
-- connection count
-- pipelining configuration
-- request payload
-- throughput
-- latency percentiles
-- error count
-- exact benchmark command
-
-Never publish a requests-per-second result without its testing context.
+- [Architecture and performance report](docs/ARCHITECTURE.md)
+- [Failure modes and drills](docs/FAILURE_MODES.md)
+- [Deployment guide](docs/DEPLOYMENT.md)
+- [Threat model](docs/THREAT_MODEL.md)
 
 ## Repository structure
 
 ```text
 WrapLink/
-├── migrations/
-│   └── 001_create_links.sql
+├── .github/workflows/ci.yml
+├── benchmark/
+│   ├── distributed/         tester.mjs, aggregate.mjs, ssm-run.sh, ssh-fleet.sh
+│   ├── RESULTS.md
+│   └── run.mjs
+├── cpp-redirect/            Drogon + RapidJSON redirect service
+├── docs/
+├── migrations/              001 links table, 002 code block sequence
+├── observability/           Prometheus config, Grafana dashboard
+├── scripts/                 redis-cluster, monitor, tune-linux, chaos
 ├── src/
-│   ├── cache/
-│   │   └── redis-client.ts
-│   ├── database/
-│   │   ├── migrate.ts
-│   │   └── pool.ts
-│   ├── domain/
-│   │   ├── code.ts
-│   │   └── link.ts
-│   ├── store/
-│   │   ├── cached-link-store.ts
-│   │   ├── memory-link-store.ts
-│   │   └── postgres-link-store.ts
-│   ├── app.ts
-│   ├── config.ts
-│   ├── metrics.ts
-│   └── server.ts
-├── test/
-│   ├── integration/
-│   │   ├── cached-link-store.test.ts
-│   │   ├── postgres-app.test.ts
-│   │   ├── postgres-link-store.test.ts
-│   │   └── redis-client.test.ts
-│   └── app.test.ts
-├── .env.example
-├── docker-compose.yml
-├── package.json
-└── tsconfig.json
+│   ├── cache/               Redis client and key layout
+│   ├── database/            pool and migrator
+│   ├── domain/              links, random codes, block code allocator
+│   ├── jobs/                sync-links, warm-cache
+│   ├── security/            API keys, rate limiting, URL policy
+│   ├── store/               memory, PostgreSQL, cached, write-behind, sync worker, click buffer
+│   ├── app.ts  cluster.ts  cluster-metrics.ts  config.ts  metrics.ts  server.ts
+├── test/                    unit tests, integration/, fixtures/
+└── docker-compose*.yml
 ```
 
-## Roadmap to the 10/10 portfolio version
+## Roadmap
 
 - [x] Fastify and TypeScript API
 - [x] Secure Base62 short-code generation
 - [x] PostgreSQL migrations and persistent storage
-- [x] PostgreSQL integration tests
-- [x] Redis cache-aside link resolution
-- [x] Atomic click counters
-- [x] Graceful Redis failure handling
-- [x] End-to-end API and database tests
-- [ ] Rate limiting and abuse prevention
-- [ ] API keys and authentication
-- [ ] Secure headers and stricter URL policies
-- [ ] Background analytics batching
-- [ ] Worker and multi-process scaling
-- [ ] Deterministic benchmark profiles
-- [ ] OpenTelemetry tracing and dashboards
-- [ ] Continuous integration
-- [ ] Production container image
-- [ ] Deployment guide and threat model
-- [ ] C++ and Drogon redirect service
-- [ ] Failure injection and profiling report
-- [ ] Evidence-based architecture report
-
-## Current limitations
-
-- Click updates still reach PostgreSQL during every redirect.
-- Cached click statistics can be temporarily stale following a Redis outage.
-- Redis reconnects require restarting the application after the retry limit is exhausted.
-- Authentication and rate limiting have not been implemented yet.
-- The current benchmark is intended for local development, not production capacity planning.
+- [x] Redis cache-aside resolution with graceful fallback
+- [x] Atomic, batched click counters
+- [x] Rate limiting and API key authentication
+- [x] Secure headers and SSRF-safe URL policy
+- [x] Background analytics batching
+- [x] Multi-process cluster runtime
+- [x] Deterministic benchmark profiles and distributed load testing
+- [x] Write-behind link creation with crash-safe sync
+- [x] Collision-free code allocation
+- [x] Redis Cluster support
+- [x] Metrics, dashboards and request IDs
+- [x] Continuous integration
+- [x] Production container image
+- [x] Deployment guide and threat model
+- [x] C++ and Drogon redirect service
+- [x] Failure injection drills
+- [x] Architecture report
+- [ ] OpenTelemetry distributed tracing (request IDs are propagated today)
+- [ ] User accounts and link ownership
+- [ ] Destination reputation checks
+- [ ] Redis Cluster support in the C++ service
+- [ ] Published multi-machine benchmark results
 
 ## License
 
-No license has been selected yet. Add a license before encouraging external reuse or contributions.
+No license has been selected yet. Add one before encouraging external reuse or contributions.

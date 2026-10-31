@@ -16,7 +16,16 @@
     "start:single": "node dist/src/server.js",
     "dev:cluster": "node --env-file=.env --watch --import tsx src/cluster.ts",
     "bench:smoke": "node benchmark/run.mjs smoke",
-    "bench:saturation": "node benchmark/run.mjs saturation"
+    "bench:saturation": "node benchmark/run.mjs saturation",
+    "sync": "tsx src/jobs/sync-links.ts",
+    "sync:prod": "node dist/src/jobs/sync-links.js",
+    "cache:warm": "tsx src/jobs/warm-cache.ts",
+    "cache:warm:prod": "node dist/src/jobs/warm-cache.js",
+    "bench:create": "node benchmark/run.mjs create",
+    "bench:aggregate": "node benchmark/distributed/aggregate.mjs",
+    "redis:cluster": "bash scripts/redis-cluster.sh",
+    "test:cpp": "c++ -std=c++17 -O2 -Wall -Wextra -Werror -pthread -Icpp-redirect/src cpp-redirect/test/core_test.cc -o cpp-redirect/core_test && ./cpp-redirect/core_test",
+    "chaos": "bash scripts/chaos.sh"
   },
   "engines": {
     "node": ">=22"

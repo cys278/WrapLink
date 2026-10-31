@@ -1,5 +1,7 @@
 import {
+  addCounter,
   addMetricsSnapshot,
+  COUNTER_NAME_PATTERN,
   copyMetricsSnapshot,
   emptyMetricsSnapshot,
   renderMetrics,
@@ -130,6 +132,28 @@ function isHttpRequestMetricsSnapshot(
   );
 }
 
+function isCounterRecord(
+  value: unknown,
+): boolean {
+  if (value === undefined) {
+    return true;
+  }
+
+  if (
+    typeof value !== "object" ||
+    value === null ||
+    Array.isArray(value)
+  ) {
+    return false;
+  }
+
+  return Object.entries(value).every(
+    ([name, count]) =>
+      COUNTER_NAME_PATTERN.test(name) &&
+      isNonNegativeSafeInteger(count),
+  );
+}
+
 function isMetricsSnapshot(
   value: unknown,
 ): value is MetricsSnapshot {
@@ -144,6 +168,7 @@ function isMetricsSnapshot(
     value as Record<string, unknown>;
 
   return (
+    isCounterRecord(snapshot.counters) &&
     isNonNegativeSafeInteger(
       snapshot.created,
     ) &&
@@ -240,7 +265,9 @@ function isEmptySnapshot(
     snapshot.created === 0 &&
     snapshot.redirects === 0 &&
     snapshot.misses === 0 &&
-    snapshot.httpRequests.length === 0
+    snapshot.httpRequests.length === 0 &&
+    Object.keys(snapshot.counters ?? {})
+      .length === 0
   );
 }
 
@@ -369,6 +396,14 @@ export class ClusterMetrics
 
   miss(): void {
     this.#pendingSnapshot.misses += 1;
+  }
+
+  increment(name: string, value = 1): void {
+    addCounter(
+      this.#pendingSnapshot,
+      name,
+      value,
+    );
   }
 
   async render(): Promise<string> {

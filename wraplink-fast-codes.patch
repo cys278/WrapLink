@@ -1,0 +1,315 @@
+From f590ec0c301d12f106661d67370b3a99d4f23c6c Mon Sep 17 00:00:00 2001
+From: WrapLink Developer <dev@wraplink.local>
+Date: Sat, 31 Oct 2026 22:15:32 +0000
+Subject: [PATCH] perf: make code scrambling 200x faster with integer Feistel
+ rounds
+
+---
+ docs/ARCHITECTURE.md         |   2 +-
+ package.json                 |   2 +-
+ src/domain/code-allocator.ts | 167 ++++++++++++++++++++++++++---------
+ test/code-allocator.test.ts  |  49 ++++++++++
+ 4 files changed, 175 insertions(+), 45 deletions(-)
+
+diff --git a/docs/ARCHITECTURE.md b/docs/ARCHITECTURE.md
+index b0e8475..e10eb03 100644
+--- a/docs/ARCHITECTURE.md
++++ b/docs/ARCHITECTURE.md
+@@ -74,7 +74,7 @@ For `N` equally likely codes, a collision becomes more likely than not after abo
+ 
+ Random 8-character codes are fine on the synchronous path because PostgreSQL's primary key rejects the duplicate and the request retries. On the write-behind path the client receives the code before PostgreSQL sees it, so uniqueness must be structural. A UUID gives it statistically but makes a 22–36 character "short" link.
+ 
+-`BlockCodeAllocator` instead reserves blocks of 10,000 integers from the PostgreSQL sequence `link_code_block_seq` (one query per 10,000 links per process). Each integer is passed through a keyed 4-round Feistel permutation with cycle-walking over `[0, 62⁹)`. A permutation is a bijection, so distinct IDs always give distinct codes, while neighbouring IDs look unrelated. The result is 9 characters, so it can never equal an 8-character random code.
++`BlockCodeAllocator` instead reserves blocks of 10,000 integers from the PostgreSQL sequence `link_code_block_seq` (one query per 10,000 links per process). Each integer is passed through a keyed 8-round Feistel permutation with cycle-walking over `[0, 62⁹)`. It uses 32-bit integer mixing (round keys derived once with HMAC-SHA256), so a code costs about a microsecond. An earlier version ran HMAC-SHA256 in every round and cost ~100 µs per code, which is far too slow for a request path at this scale. A permutation is a bijection, so distinct IDs always give distinct codes, while neighbouring IDs look unrelated. This is obfuscation, not encryption: it stops casual enumeration, but private destinations still need authentication. The result is 9 characters, so it can never equal an 8-character random code.
+ 
+ The permutation key is `CODE_SCRAMBLE_SECRET`. **Never change it after launch:** a new key could map future IDs onto codes already issued. Any such collision would be caught at sync time and dead-lettered, but it would still break a link a user already holds.
+ 
+diff --git a/package.json b/package.json
+index e3929a3..d9ccfdc 100644
+--- a/package.json
++++ b/package.json
+@@ -24,7 +24,7 @@
+     "bench:create": "node benchmark/run.mjs create",
+     "bench:aggregate": "node benchmark/distributed/aggregate.mjs",
+     "redis:cluster": "bash scripts/redis-cluster.sh",
+-    "test:cpp": "g++ -std=c++17 -O2 -Wall -Wextra -Werror -pthread -Icpp-redirect/src cpp-redirect/test/core_test.cc -o cpp-redirect/core_test && ./cpp-redirect/core_test",
++    "test:cpp": "c++ -std=c++17 -O2 -Wall -Wextra -Werror -pthread -Icpp-redirect/src cpp-redirect/test/core_test.cc -o cpp-redirect/core_test && ./cpp-redirect/core_test",
+     "chaos": "bash scripts/chaos.sh"
+   },
+   "engines": {
+diff --git a/src/domain/code-allocator.ts b/src/domain/code-allocator.ts
+index a849e3c..515977e 100644
+--- a/src/domain/code-allocator.ts
++++ b/src/domain/code-allocator.ts
+@@ -40,13 +40,7 @@ export const ALLOCATED_CODE_LENGTH = 9;
+ export const ALLOCATED_CODE_SPACE =
+   62n ** BigInt(ALLOCATED_CODE_LENGTH);
+ 
+-const HALF_BITS = 27n;
+-const HALF_MASK = (1n << HALF_BITS) - 1n;
+-const FEISTEL_ROUNDS = 4;
+-
+-// The Feistel network permutes 54-bit values. 2^54 / 62^9 ≈ 1.33, so
+-// cycle-walking needs about 1.33 permutations per code on average.
+-
++/** Reference Base62 encoder (BigInt). The hot path uses CodeScrambler.encode. */
+ export function encodeBase62Fixed(
+   value: bigint,
+   length: number,
+@@ -70,21 +64,61 @@ export function encodeBase62Fixed(
+   return characters.join("");
+ }
+ 
++// The Feistel network permutes 54-bit values split into two 27-bit halves.
++// 2^54 / 62^9 ≈ 1.33, so cycle-walking needs ~1.33 permutations per code.
++const HALF_BITS = 27;
++const HALF_SIZE = 2 ** HALF_BITS;
++const HALF_MASK = HALF_SIZE - 1;
++const FEISTEL_ROUNDS = 8;
++
++// The code space split the same way: 62^9 = SPACE_HIGH * 2^27 + SPACE_LOW.
++const SPACE_HIGH = Number(ALLOCATED_CODE_SPACE / BigInt(HALF_SIZE));
++const SPACE_LOW = Number(ALLOCATED_CODE_SPACE % BigInt(HALF_SIZE));
++
++function insideCodeSpace(high: number, low: number): boolean {
++  return (
++    high < SPACE_HIGH ||
++    (high === SPACE_HIGH && low < SPACE_LOW)
++  );
++}
++
++/**
++ * Keyed Feistel permutation over [0, 62^9).
++ *
++ * Performance: generating a code is on the request path in write-behind
++ * mode, so all arithmetic stays in 32-bit integers (no BigInt, no crypto
++ * objects per call). Round keys are derived once from the secret with
++ * HMAC-SHA256; each round then applies a keyed MurmurHash3-style mixer.
++ * A Feistel network is a bijection for *any* round function, so code
++ * uniqueness does not depend on the mixer's strength.
++ *
++ * Security: this makes codes non-sequential and impractical to enumerate
++ * without the secret. It is obfuscation, not encryption; do not rely on it
++ * to keep links secret. Private destinations need authentication.
++ */
+ export class CodeScrambler {
+-  private readonly roundKeys: readonly Buffer[];
++  private readonly roundKeys: Uint32Array;
+ 
+   constructor(secret: string) {
+     if (secret.length === 0) {
+       throw new Error("scramble secret must not be empty");
+     }
+ 
+-    this.roundKeys = Array.from(
+-      { length: FEISTEL_ROUNDS },
+-      (_, round) =>
+-        createHmac("sha256", secret)
+-          .update(`wraplink-feistel-round-${round}`)
+-          .digest(),
+-    );
++    const material = Buffer.concat([
++      createHmac("sha256", secret)
++        .update("wraplink-feistel-keys-0")
++        .digest(),
++      createHmac("sha256", secret)
++        .update("wraplink-feistel-keys-1")
++        .digest(),
++    ]);
++
++    // Two 32-bit words per round.
++    this.roundKeys = new Uint32Array(FEISTEL_ROUNDS * 2);
++
++    for (let index = 0; index < this.roundKeys.length; index += 1) {
++      this.roundKeys[index] = material.readUInt32BE(index * 4);
++    }
+   }
+ 
+   /** Bijective map from [0, 62^9) to [0, 62^9). */
+@@ -93,48 +127,95 @@ export class CodeScrambler {
+       throw new Error("id is outside the code space");
+     }
+ 
+-    let value = this.feistel(id);
+-
+-    // Cycle-walking keeps the permutation inside [0, 62^9).
+-    while (value >= ALLOCATED_CODE_SPACE) {
+-      value = this.feistel(value);
+-    }
++    const [high, low] = this.permuteHalves(
++      Number(id / BigInt(HALF_SIZE)),
++      Number(id % BigInt(HALF_SIZE)),
++    );
+ 
+-    return value;
++    return BigInt(high) * BigInt(HALF_SIZE) + BigInt(low);
+   }
+ 
+   encode(id: bigint): string {
+-    return encodeBase62Fixed(
+-      this.permute(id),
+-      ALLOCATED_CODE_LENGTH,
++    if (id < 0n || id >= ALLOCATED_CODE_SPACE) {
++      throw new Error("id is outside the code space");
++    }
++
++    let [high, low] = this.permuteHalves(
++      Number(id / BigInt(HALF_SIZE)),
++      Number(id % BigInt(HALF_SIZE)),
+     );
+-  }
+ 
+-  private feistel(value: bigint): bigint {
+-    let left = (value >> HALF_BITS) & HALF_MASK;
+-    let right = value & HALF_MASK;
++    // Base62 digits of high * 2^27 + low using only safe integers:
++    // divide the two-part number by 62, carrying the remainder down.
++    const characters = new Array<string>(ALLOCATED_CODE_LENGTH);
+ 
+-    for (const key of this.roundKeys) {
+-      const mixed = left ^ this.round(key, right);
+-      left = right;
+-      right = mixed;
++    for (
++      let index = ALLOCATED_CODE_LENGTH - 1;
++      index >= 0;
++      index -= 1
++    ) {
++      const highRemainder = high % 62;
++      high = Math.floor(high / 62);
++
++      const combined = highRemainder * HALF_SIZE + low;
++      low = Math.floor(combined / 62);
++
++      characters[index] = ALPHABET[combined % 62]!;
+     }
+ 
+-    const result = (left << HALF_BITS) | right;
++    return characters.join("");
++  }
++
++  private permuteHalves(
++    high: number,
++    low: number,
++  ): [number, number] {
++    let [left, right] = this.feistel(high, low);
+ 
+-    // left and right are 27-bit values, so result < 2^54.
+-    return result;
++    // Cycle-walking keeps the permutation inside [0, 62^9).
++    while (!insideCodeSpace(left, right)) {
++      [left, right] = this.feistel(left, right);
++    }
++
++    return [left, right];
+   }
+ 
+-  private round(key: Buffer, half: bigint): bigint {
+-    const input = Buffer.alloc(4);
+-    input.writeUInt32BE(Number(half));
++  private feistel(
++    high: number,
++    low: number,
++  ): [number, number] {
++    let left = high;
++    let right = low;
++
++    for (let round = 0; round < FEISTEL_ROUNDS; round += 1) {
++      const mixed =
++        (left ^
++          this.round(
++            right,
++            this.roundKeys[round * 2]!,
++            this.roundKeys[round * 2 + 1]!,
++          )) &
++        HALF_MASK;
+ 
+-    const digest = createHmac("sha256", key)
+-      .update(input)
+-      .digest();
++      left = right;
++      right = mixed;
++    }
++
++    return [left, right];
++  }
+ 
+-    return BigInt(digest.readUInt32BE(0)) & HALF_MASK;
++  private round(
++    half: number,
++    keyA: number,
++    keyB: number,
++  ): number {
++    let hash = (half ^ keyA) >>> 0;
++    hash = Math.imul(hash ^ (hash >>> 16), 0x85ebca6b);
++    hash = Math.imul(hash ^ (hash >>> 13), 0xc2b2ae35);
++    hash = (hash ^ (hash >>> 16)) >>> 0;
++    hash = Math.imul(hash ^ keyB, 0x9e3779b1);
++
++    return (hash ^ (hash >>> 15)) & HALF_MASK;
+   }
+ }
+ 
+diff --git a/test/code-allocator.test.ts b/test/code-allocator.test.ts
+index 17aba41..95047b1 100644
+--- a/test/code-allocator.test.ts
++++ b/test/code-allocator.test.ts
+@@ -70,6 +70,55 @@ describe("CodeScrambler", () => {
+     ).toBe(true);
+   });
+ 
++  it("encodes exactly like the BigInt reference implementation", () => {
++    const scrambler = new CodeScrambler(SECRET);
++
++    for (const id of [
++      0n,
++      1n,
++      61n,
++      62n,
++      123_456_789n,
++      2n ** 53n,
++      ALLOCATED_CODE_SPACE - 1n,
++    ]) {
++      expect(scrambler.encode(id)).toBe(
++        encodeBase62Fixed(scrambler.permute(id), ALLOCATED_CODE_LENGTH),
++      );
++    }
++  });
++
++  it("is a true permutation of a small window", () => {
++    // Every ID maps back to a distinct value inside the code space.
++    const scrambler = new CodeScrambler(SECRET);
++    const values = new Set<bigint>();
++
++    for (let id = ALLOCATED_CODE_SPACE - 20_000n; id < ALLOCATED_CODE_SPACE; id += 1n) {
++      const value = scrambler.permute(id);
++
++      expect(value >= 0n && value < ALLOCATED_CODE_SPACE).toBe(true);
++      values.add(value);
++    }
++
++    expect(values.size).toBe(20_000);
++  });
++
++  it("generates codes fast enough for the request path", () => {
++    const scrambler = new CodeScrambler(SECRET);
++    const started = performance.now();
++
++    for (let id = 0n; id < 100_000n; id += 1n) {
++      scrambler.encode(id);
++    }
++
++    const microsecondsPerCode =
++      ((performance.now() - started) * 1_000) / 100_000;
++
++    // Typically ~1 µs. The generous bound only catches regressions such as
++    // reintroducing per-call crypto objects (~100 µs on a laptop).
++    expect(microsecondsPerCode).toBeLessThan(25);
++  });
++
+   it("hides the sequential order of IDs", () => {
+     const scrambler = new CodeScrambler(SECRET);
+     const a = scrambler.permute(1_000n);
+-- 
+2.43.0
+

@@ -1,3 +1,5 @@
+import { randomUUID } from "node:crypto";
+import type { IncomingMessage } from "node:http";
 import Fastify, {
   LogController,
   type FastifyInstance,
@@ -21,6 +23,41 @@ interface CreateBody {
 }
 
 const CODE_PATTERN = /^[A-Za-z0-9_-]{4,32}$/;
+const REQUEST_ID_PATTERN = /^[A-Za-z0-9._:-]{1,128}$/;
+
+/** The HTTP-facing subset of AppConfig that buildApp actually reads. */
+export type AppHttpConfig = Pick<
+  AppConfig,
+  "baseUrl" | "logLevel"
+> & {
+  trustProxy?: boolean;
+};
+
+export interface AppOptions {
+  /**
+   * Produces codes for links without a customCode. Defaults to 8 random
+   * Base62 characters; write-behind mode injects the collision-free
+   * block allocator instead.
+   */
+  codeGenerator?: () => Promise<string>;
+  /** Extra Prometheus exposition text (gauges) appended to /metrics. */
+  extraMetrics?: () => Promise<string>;
+}
+
+function requestId(request: IncomingMessage): string {
+  // Reuse a caller-supplied ID (for example from a load balancer) so one
+  // request can be followed across services; otherwise mint one.
+  const supplied = request.headers["x-request-id"];
+
+  if (
+    typeof supplied === "string" &&
+    REQUEST_ID_PATTERN.test(supplied)
+  ) {
+    return supplied;
+  }
+
+  return randomUUID();
+}
 
 function validHttpUrl(
   value: unknown,
@@ -46,15 +83,23 @@ function validHttpUrl(
 }
 
 export function buildApp(
-  config: AppConfig,
+  config: AppHttpConfig,
   store: LinkStore,
   rateLimiter?: RateLimiter,
   apiKeyAuthenticator?: ApiKeyAuthenticator,
   urlPolicy?: UrlPolicy,
   metrics: MetricsCollector = new Metrics(),
+  options: AppOptions = {},
 ): FastifyInstance {
+  const codeGenerator =
+    options.codeGenerator ??
+    (async () => generateCode());
+
   const app = Fastify({
     logger: { level: config.logLevel },
+    trustProxy: config.trustProxy ?? false,
+    requestIdHeader: false,
+    genReqId: requestId,
     logController: new LogController({
       disableRequestLogging: true,
     }),
@@ -68,8 +113,9 @@ export function buildApp(
 
   app.addHook(
     "onSend",
-    async (_request, reply, payload) => {
+    async (request, reply, payload) => {
       reply.headers({
+        "x-request-id": request.id,
         "content-security-policy":
           "default-src 'none'",
         "permissions-policy":
@@ -146,10 +192,23 @@ export function buildApp(
 
   app.get(
     "/metrics",
-    async (_request, reply) => {
+    async (request, reply) => {
+      let body = await metrics.render();
+
+      if (options.extraMetrics) {
+        try {
+          body += await options.extraMetrics();
+        } catch (error) {
+          request.log.warn(
+            { error },
+            "could not collect extra metrics",
+          );
+        }
+      }
+
       return reply
         .type("text/plain; version=0.0.4")
-        .send(await metrics.render());
+        .send(body);
     },
   );
 
@@ -275,16 +334,35 @@ export function buildApp(
         attempt < 5;
         attempt += 1
       ) {
-        const code =
-          typeof custom === "string"
-            ? custom
-            : generateCode();
+        let code: string;
+
+        if (typeof custom === "string") {
+          code = custom;
+        } else {
+          try {
+            code = await codeGenerator();
+          } catch (error) {
+            request.log.error(
+              { error },
+              "could not generate a short code",
+            );
+
+            return reply.code(503).send({
+              error:
+                "link creation is temporarily unavailable",
+            });
+          }
+        }
 
         const link =
           await store.create({
             code,
             targetUrl,
             expiresAt,
+            codeSource:
+              typeof custom === "string"
+                ? "custom"
+                : "generated",
           });
 
         if (link) {

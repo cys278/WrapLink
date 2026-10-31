@@ -9,23 +9,63 @@ import {
 import process from "node:process";
 import autocannon from "autocannon";
 
+/*
+ * Concurrency in flight at the server = connections x pipelining.
+ * `workers` spreads the client over threads so the load generator is not
+ * the bottleneck (one Node thread saturates long before a large server).
+ */
 const profiles = {
   smoke: {
     connections: 10,
     duration: 5,
     pipelining: 1,
+    workers: 0,
   },
   baseline: {
     connections: 100,
     duration: 30,
     pipelining: 10,
+    workers: 0,
   },
   saturation: {
     connections: 250,
     duration: 60,
     pipelining: 10,
+    workers: 0,
+  },
+  // Link creation. Requires BENCHMARK_API_KEY and a CREATE_RATE_LIMIT_MAX
+  // high enough for the run (the limit is per client IP).
+  create: {
+    connections: 50,
+    duration: 30,
+    pipelining: 1,
+    workers: 0,
+    method: "POST",
+    path: "/api/v1/links",
+    expectedStatus: 201,
   },
 };
+
+function positiveIntegerEnv(name, fallback, allowZero = false) {
+  const raw = process.env[name];
+
+  if (raw === undefined || raw === "") {
+    return fallback;
+  }
+
+  const value = Number(raw);
+
+  if (
+    !Number.isSafeInteger(value) ||
+    value < (allowZero ? 0 : 1)
+  ) {
+    throw new Error(
+      `${name} must be a ${allowZero ? "non-negative" : "positive"} integer`,
+    );
+  }
+
+  return value;
+}
 
 const profileName =
   process.argv[2] ?? "smoke";
@@ -42,30 +82,48 @@ if (!selectedProfile) {
   process.exit(1);
 }
 
-const connectionOverride =
-  process.env.BENCHMARK_CONNECTIONS;
+const profile = {
+  connections: positiveIntegerEnv(
+    "BENCHMARK_CONNECTIONS",
+    selectedProfile.connections,
+  ),
+  duration: positiveIntegerEnv(
+    "BENCHMARK_DURATION",
+    selectedProfile.duration,
+  ),
+  pipelining: positiveIntegerEnv(
+    "BENCHMARK_PIPELINING",
+    selectedProfile.pipelining,
+  ),
+  workers: positiveIntegerEnv(
+    "BENCHMARK_WORKERS",
+    selectedProfile.workers,
+    true,
+  ),
+};
 
-const connections =
-  connectionOverride === undefined
-    ? selectedProfile.connections
-    : Number.parseInt(
-        connectionOverride,
-        10,
-      );
+const method = (
+  process.env.BENCHMARK_METHOD ??
+  selectedProfile.method ??
+  "GET"
+).toUpperCase();
 
-if (
-  !Number.isSafeInteger(connections) ||
-  connections < 1
-) {
-  throw new Error(
-    "BENCHMARK_CONNECTIONS must be a positive integer",
-  );
+const headers = {};
+let body;
+
+if (method !== "GET" && method !== "HEAD") {
+  body =
+    process.env.BENCHMARK_BODY ??
+    JSON.stringify({
+      url: "https://github.com/cys278/WrapLink",
+    });
+
+  headers["content-type"] = "application/json";
 }
 
-const profile = {
-  ...selectedProfile,
-  connections,
-};
+if (process.env.BENCHMARK_API_KEY) {
+  headers["x-api-key"] = process.env.BENCHMARK_API_KEY;
+}
 
 const baseUrl =
   process.env.BENCHMARK_BASE_URL ??
@@ -73,6 +131,7 @@ const baseUrl =
 
 const path =
   process.env.BENCHMARK_PATH ??
+  selectedProfile.path ??
   "/container-demo";
 
 if (!path.startsWith("/")) {
@@ -88,7 +147,7 @@ const target = new URL(
 
 const expectedStatus = Number.parseInt(
   process.env.BENCHMARK_EXPECTED_STATUS ??
-    "302",
+    String(selectedProfile.expectedStatus ?? 302),
   10,
 );
 
@@ -103,12 +162,17 @@ if (
 }
 
 const preflight = await fetch(target, {
+  method,
+  headers,
+  body,
   redirect: "manual",
 });
 
 if (preflight.status !== expectedStatus) {
   throw new Error(
-    `Benchmark preflight expected HTTP ${expectedStatus}, received ${preflight.status}`,
+    `Benchmark preflight expected HTTP ${expectedStatus}, received ${preflight.status}: ${(
+      await preflight.text()
+    ).slice(0, 200)}`,
   );
 }
 
@@ -126,12 +190,23 @@ console.info(
 console.info(
   `Pipelining: ${profile.pipelining}`,
 );
+console.info(`Method: ${method}`);
+console.info(
+  `Client worker threads: ${profile.workers || "none (main thread)"}`,
+);
+console.info(
+  `In-flight requests: ${profile.connections * profile.pipelining} (connections x pipelining)`,
+);
 
 const result = await autocannon({
   url: target,
+  method,
+  headers,
+  ...(body === undefined ? {} : { body }),
   connections: profile.connections,
   duration: profile.duration,
   pipelining: profile.pipelining,
+  ...(profile.workers > 0 ? { workers: profile.workers } : {}),
 });
 
 const timestamp = new Date()
@@ -149,6 +224,7 @@ const report = {
   benchmark: {
     profile: profileName,
     target,
+    method,
     expectedStatus,
     ...profile,
     timestamp: new Date().toISOString(),
@@ -215,6 +291,11 @@ console.info(
 );
 console.info(
   `Latency p99: ${result.latency.p99} ms`,
+);
+console.info(
+  `Throughput: ${(result.throughput.average / 1e6).toFixed(1)} MB/s ` +
+    `(${((result.throughput.average * 8) / 1e9).toFixed(2)} Gbit/s); ` +
+    "compare with the NIC's line rate to spot a network bottleneck",
 );
 console.info(`Errors: ${result.errors}`);
 console.info(`Timeouts: ${result.timeouts}`);

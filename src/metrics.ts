@@ -17,7 +17,15 @@ export interface MetricsSnapshot {
   redirects: number;
   misses: number;
   httpRequests: HttpRequestMetricsSnapshot[];
+  /**
+   * Named monotonic counters such as `links_synced`. Rendered as
+   * `shortener_<name>_total`. Omitted when no counter has been incremented
+   * so snapshots stay compact on the IPC channel.
+   */
+  counters?: Record<string, number>;
 }
+
+export const COUNTER_NAME_PATTERN = /^[a-z][a-z0-9_]{0,63}$/;
 
 export interface MetricsCollector {
   request(
@@ -30,6 +38,7 @@ export interface MetricsCollector {
   created(): void;
   redirect(): void;
   miss(): void;
+  increment(name: string, value?: number): void;
   render(): Promise<string>;
 }
 
@@ -125,7 +134,7 @@ function copyHttpSeries(
 export function copyMetricsSnapshot(
   snapshot: MetricsSnapshot,
 ): MetricsSnapshot {
-  return {
+  const copy: MetricsSnapshot = {
     created: snapshot.created,
     redirects: snapshot.redirects,
     misses: snapshot.misses,
@@ -134,6 +143,30 @@ export function copyMetricsSnapshot(
         copyHttpSeries,
       ),
   };
+
+  if (snapshot.counters) {
+    copy.counters = { ...snapshot.counters };
+  }
+
+  return copy;
+}
+
+export function addCounter(
+  snapshot: MetricsSnapshot,
+  name: string,
+  value: number,
+): void {
+  if (
+    !COUNTER_NAME_PATTERN.test(name) ||
+    !Number.isSafeInteger(value) ||
+    value <= 0
+  ) {
+    return;
+  }
+
+  const counters = (snapshot.counters ??= {});
+
+  counters[name] = (counters[name] ?? 0) + value;
 }
 
 function escapePrometheusLabel(
@@ -223,6 +256,14 @@ export function addMetricsSnapshot(
   target.created += source.created;
   target.redirects += source.redirects;
   target.misses += source.misses;
+
+  if (source.counters) {
+    for (const [name, value] of Object.entries(
+      source.counters,
+    )) {
+      addCounter(target, name, value);
+    }
+  }
 
   const targetSeries = new Map<
     string,
@@ -326,6 +367,22 @@ export function renderMetrics(
     `shortener_redirects_total ${snapshot.redirects}`,
     "# TYPE shortener_redirect_misses_total counter",
     `shortener_redirect_misses_total ${snapshot.misses}`,
+  );
+
+  const counters = Object.entries(
+    snapshot.counters ?? {},
+  ).sort(([left], [right]) =>
+    left.localeCompare(right),
+  );
+
+  for (const [name, value] of counters) {
+    lines.push(
+      `# TYPE shortener_${name}_total counter`,
+      `shortener_${name}_total ${value}`,
+    );
+  }
+
+  lines.push(
     "# TYPE shortener_http_request_duration_seconds histogram",
   );
 
@@ -434,6 +491,10 @@ export class Metrics
 
   miss(): void {
     this.#snapshot.misses += 1;
+  }
+
+  increment(name: string, value = 1): void {
+    addCounter(this.#snapshot, name, value);
   }
 
   snapshot(): MetricsSnapshot {

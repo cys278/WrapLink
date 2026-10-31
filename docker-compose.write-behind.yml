@@ -1,0 +1,15 @@
+# Runs the API in write-behind mode: generated links are acknowledged from
+# Redis and synced to PostgreSQL in batches by every worker.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.write-behind.yml up -d --build
+#
+# CODE_SCRAMBLE_SECRET must be set in .env (32+ characters) and must never
+# change once links exist.
+services:
+  app:
+    environment:
+      LINK_WRITE_MODE: write-behind
+      CODE_SCRAMBLE_SECRET: ${CODE_SCRAMBLE_SECRET:?CODE_SCRAMBLE_SECRET must be set in .env}
+      WRITE_BEHIND_MAX_PENDING: 1000000
+      LINK_SYNC_INTERVAL_MS: 250
+      LINK_SYNC_BATCH_SIZE: 1000

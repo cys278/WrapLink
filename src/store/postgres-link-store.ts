@@ -3,7 +3,16 @@ import type {
   CreateLinkInput,
   Link,
   LinkStore,
+  PendingLink,
 } from "../domain/link.js";
+import type { BatchedClickSink } from "./click-buffer.js";
+
+export interface PendingLinkBatchResult {
+  /** Codes that are now durable, including idempotent replays. */
+  persisted: string[];
+  /** Codes already owned by a *different* link in PostgreSQL. */
+  conflicts: PendingLink[];
+}
 
 interface LinkRow {
   code: string;
@@ -24,7 +33,7 @@ function mapLink(row: LinkRow): Link {
 }
 
 export class PostgresLinkStore
-  implements LinkStore
+  implements LinkStore, BatchedClickSink
 {
   constructor(
     private readonly pool: Pool,
@@ -118,11 +127,17 @@ export class PostgresLinkStore
     );
   }
 
+  /**
+   * Applies aggregated click increments in one statement and returns the
+   * codes that matched no row. A link created through the write-behind
+   * path can be clicked before the sync worker has inserted it; the click
+   * buffer retries those codes instead of silently dropping the clicks.
+   */
   async recordClickBatch(
     clicks: ReadonlyMap<string, number>,
-  ): Promise<void> {
+  ): Promise<ReadonlySet<string>> {
     if (clicks.size === 0) {
-      return;
+      return new Set();
     }
 
     const codes: string[] = [];
@@ -142,7 +157,9 @@ export class PostgresLinkStore
       counts.push(count);
     }
 
-    await this.pool.query(
+    const result = await this.pool.query<{
+      code: string;
+    }>(
       `
         UPDATE links AS link
         SET clicks =
@@ -157,11 +174,148 @@ export class PostgresLinkStore
           ) AS values(code, count)
         ) AS batch
         WHERE link.code = batch.code
+        RETURNING link.code
       `,
       [codes, counts],
     );
+
+    const matched = new Set(
+      result.rows.map((row) => row.code),
+    );
+
+    return new Set(
+      codes.filter((code) => !matched.has(code)),
+    );
   }
 
+  /**
+   * Inserts links accepted by the write-behind path.
+   *
+   * The insert is idempotent: if a previous attempt committed but the
+   * worker crashed before acknowledging the queue, the replayed rows are
+   * recognised (same code, target and creation instant) and reported as
+   * persisted rather than as conflicts.
+   */
+  async insertPendingBatch(
+    links: readonly PendingLink[],
+  ): Promise<PendingLinkBatchResult> {
+    if (links.length === 0) {
+      return { persisted: [], conflicts: [] };
+    }
+
+    // Deduplicate within the batch; the first occurrence wins.
+    const unique = new Map<string, PendingLink>();
+
+    for (const link of links) {
+      if (!unique.has(link.code)) {
+        unique.set(link.code, link);
+      }
+    }
+
+    const batch = [...unique.values()];
+
+    const inserted = await this.pool.query<{
+      code: string;
+    }>(
+      `
+        INSERT INTO links (
+          code,
+          target_url,
+          created_at,
+          expires_at
+        )
+        SELECT
+          code,
+          target_url,
+          created_at,
+          expires_at
+        FROM UNNEST(
+          $1::text[],
+          $2::text[],
+          $3::timestamptz[],
+          $4::timestamptz[]
+        ) AS pending(
+          code,
+          target_url,
+          created_at,
+          expires_at
+        )
+        ON CONFLICT (code) DO NOTHING
+        RETURNING code
+      `,
+      [
+        batch.map((link) => link.code),
+        batch.map((link) => link.targetUrl),
+        batch.map((link) =>
+          link.createdAt.toISOString(),
+        ),
+        batch.map(
+          (link) =>
+            link.expiresAt?.toISOString() ?? null,
+        ),
+      ],
+    );
+
+    const persisted = new Set(
+      inserted.rows.map((row) => row.code),
+    );
+
+    const notInserted = batch.filter(
+      (link) => !persisted.has(link.code),
+    );
+
+    const conflicts: PendingLink[] = [];
+
+    if (notInserted.length > 0) {
+      const existing = await this.pool.query<{
+        code: string;
+        target_url: string;
+        created_ms: string;
+      }>(
+        `
+          SELECT
+            code,
+            target_url,
+            (EXTRACT(EPOCH FROM created_at) * 1000)::bigint
+              AS created_ms
+          FROM links
+          WHERE code = ANY($1::text[])
+        `,
+        [notInserted.map((link) => link.code)],
+      );
+
+      const rows = new Map(
+        existing.rows.map((row) => [row.code, row]),
+      );
+
+      for (const link of notInserted) {
+        const row = rows.get(link.code);
+
+        const isReplay =
+          row !== undefined &&
+          row.target_url === link.targetUrl &&
+          Number(row.created_ms) ===
+            link.createdAt.getTime();
+
+        if (isReplay) {
+          persisted.add(link.code);
+        } else {
+          conflicts.push(link);
+        }
+      }
+    }
+
+    return {
+      persisted: [...persisted],
+      conflicts,
+    };
+  }
+
+  /**
+   * Exact row count. COUNT(*) is O(n): PostgreSQL scans the table (or an
+   * index) every time. Never call this on a request path; use
+   * estimatedSize() for dashboards and metrics.
+   */
   async size(): Promise<number> {
     const result = await this.pool.query<{
       count: string;
@@ -172,6 +326,24 @@ export class PostgresLinkStore
     return Number(
       result.rows[0]?.count ?? 0,
     );
+  }
+
+  /**
+   * O(1) planner estimate maintained by VACUUM/ANALYZE. Returns 0 until the
+   * table has been analysed at least once.
+   */
+  async estimatedSize(): Promise<number> {
+    const result = await this.pool.query<{
+      estimate: string;
+    }>(
+      `
+        SELECT GREATEST(reltuples, 0)::bigint AS estimate
+        FROM pg_class
+        WHERE oid = 'links'::regclass
+      `,
+    );
+
+    return Number(result.rows[0]?.estimate ?? 0);
   }
 
   async isHealthy(): Promise<boolean> {

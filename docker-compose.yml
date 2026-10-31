@@ -26,6 +26,10 @@ services:
       - redis-server
       - --appendonly
       - "yes"
+      # Under memory pressure evict only keys with a TTL (cached links).
+      # Write-behind links waiting for PostgreSQL have no TTL and are kept.
+      - --maxmemory-policy
+      - volatile-lru
     ports:
       - "6379:6379"
     volumes:
@@ -65,15 +69,17 @@ services:
     environment:
       HOST: 0.0.0.0
       PORT: 3000
-      WEB_CONCURRENCY: 2
+      WEB_CONCURRENCY: "${WEB_CONCURRENCY:-2}"
       BASE_URL: http://localhost:3000
       LOG_LEVEL: info
       DATABASE_URL: postgresql://shortener:shortener@postgres:5432/shortener
       DATABASE_POOL_MAX: 20
       REDIS_URL: redis://redis:6379
       REDIS_CACHE_TTL_SECONDS: 300
-      CREATE_RATE_LIMIT_MAX: 20
+      CREATE_RATE_LIMIT_MAX: "${CREATE_RATE_LIMIT_MAX:-20}"
       CREATE_RATE_LIMIT_WINDOW_SECONDS: 60
+      LINK_WRITE_MODE: "${LINK_WRITE_MODE:-sync}"
+      CODE_SCRAMBLE_SECRET: "${CODE_SCRAMBLE_SECRET:-}"
       CREATE_API_KEYS: ${CREATE_API_KEYS:?CREATE_API_KEYS must be set in .env}
     ports:
       - "3000:3000"

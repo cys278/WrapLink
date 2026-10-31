@@ -8,6 +8,7 @@ import {
   it,
 } from "vitest";
 import { Pool } from "pg";
+import { linkKey } from "../../src/cache/keys.js";
 import { createRedisClient } from "../../src/cache/redis-client.js";
 import { CachedLinkStore } from "../../src/store/cached-link-store.js";
 import { ClickBuffer } from "../../src/store/click-buffer.js";
@@ -51,7 +52,7 @@ const codes = [
 function cacheKey(
   code: string,
 ): string {
-  return `wraplink:link:${code}`;
+  return linkKey(code);
 }
 
 beforeAll(async () => {

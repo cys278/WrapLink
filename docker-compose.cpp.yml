@@ -1,0 +1,33 @@
+# Adds the C++ Drogon redirect service on port 5555. It shares PostgreSQL and
+# Redis with the Node.js API. The first build compiles Drogon and takes
+# several minutes.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.cpp.yml up -d --build
+#   curl -i http://localhost:5555/container-demo
+services:
+  redirect-cpp:
+    build:
+      context: ./cpp-redirect
+    image: wraplink-redirect-cpp:local
+    restart: unless-stopped
+    environment:
+      PORT: 5555
+      THREADS: 0
+      PGHOST: postgres
+      PGPORT: 5432
+      PGDATABASE: shortener
+      PGUSER: shortener
+      PGPASSWORD: shortener
+      PG_CONNECTIONS: 16
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_CONNECTIONS: 16
+      REDIS_CACHE_TTL_SECONDS: 300
+      LOG_LEVEL: WARN
+    ports:
+      - "5555:5555"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy

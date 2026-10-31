@@ -1,7 +1,12 @@
 export interface BatchedClickSink {
+  /**
+   * Persists aggregated clicks. May return the codes that matched no
+   * stored link; those clicks are retried on later flushes because the
+   * link may still be waiting in the write-behind queue.
+   */
   recordClickBatch(
     clicks: ReadonlyMap<string, number>,
-  ): Promise<void>;
+  ): Promise<void | ReadonlySet<string>>;
 }
 
 export class ClickBuffer {
@@ -20,10 +25,16 @@ export class ClickBuffer {
 
   private closed = false;
 
+  private readonly unmatchedAttempts =
+    new Map<string, number>();
+
+  private dropped = 0;
+
   constructor(
     private readonly sink: BatchedClickSink,
     private readonly flushIntervalMs = 1_000,
     private readonly maxPendingClicks = 10_000,
+    private readonly maxUnmatchedAttempts = 10,
   ) {
     if (
       !Number.isSafeInteger(
@@ -44,6 +55,17 @@ export class ClickBuffer {
     ) {
       throw new Error(
         "maximum pending clicks must be a positive integer",
+      );
+    }
+
+    if (
+      !Number.isSafeInteger(
+        maxUnmatchedAttempts,
+      ) ||
+      maxUnmatchedAttempts < 1
+    ) {
+      throw new Error(
+        "maximum unmatched attempts must be a positive integer",
       );
     }
   }
@@ -150,6 +172,11 @@ export class ClickBuffer {
     return this.pendingTotal;
   }
 
+  /** Clicks discarded because their link never appeared in storage. */
+  droppedClicks(): number {
+    return this.dropped;
+  }
+
   private async performFlush(): Promise<void> {
     if (this.pending.size === 0) {
       return;
@@ -162,10 +189,13 @@ export class ClickBuffer {
 
     this.pendingTotal = 0;
 
+    let unmatched: void | ReadonlySet<string>;
+
     try {
-      await this.sink.recordClickBatch(
-        batch,
-      );
+      unmatched =
+        await this.sink.recordClickBatch(
+          batch,
+        );
     } catch (error) {
       for (const [code, count] of batch) {
         this.pending.set(
@@ -178,6 +208,42 @@ export class ClickBuffer {
       }
 
       throw error;
+    }
+
+    for (const code of batch.keys()) {
+      if (!unmatched?.has(code)) {
+        this.unmatchedAttempts.delete(code);
+      }
+    }
+
+    if (!unmatched || unmatched.size === 0) {
+      return;
+    }
+
+    for (const code of unmatched) {
+      const count = batch.get(code);
+
+      if (count === undefined) {
+        continue;
+      }
+
+      const attempts =
+        (this.unmatchedAttempts.get(code) ?? 0) + 1;
+
+      if (attempts >= this.maxUnmatchedAttempts) {
+        this.unmatchedAttempts.delete(code);
+        this.dropped += count;
+        continue;
+      }
+
+      this.unmatchedAttempts.set(code, attempts);
+
+      this.pending.set(
+        code,
+        (this.pending.get(code) ?? 0) + count,
+      );
+
+      this.pendingTotal += count;
     }
   }
 }

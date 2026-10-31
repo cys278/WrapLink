@@ -165,4 +165,63 @@ describe("ClickBuffer", () => {
       );
     },
   );
+
+  it(
+    "retries clicks for links that are not stored yet",
+    async () => {
+      let stored = false;
+
+      const recordClickBatch = vi.fn(
+        async (clicks: ReadonlyMap<string, number>) =>
+          stored
+            ? new Set<string>()
+            : new Set([...clicks.keys()].filter((code) => code === "fresh")),
+      );
+
+      const buffer = new ClickBuffer({ recordClickBatch });
+
+      buffer.record("fresh");
+      buffer.record("fresh");
+      buffer.record("old");
+
+      await buffer.flush();
+
+      // "old" was stored; "fresh" is still in the write-behind queue.
+      expect(buffer.pendingClicks()).toBe(2);
+
+      stored = true;
+      await buffer.flush();
+
+      expect(buffer.pendingClicks()).toBe(0);
+      expect(buffer.droppedClicks()).toBe(0);
+      expect(recordClickBatch).toHaveBeenLastCalledWith(
+        new Map([["fresh", 2]]),
+      );
+    },
+  );
+
+  it(
+    "drops clicks for links that never appear",
+    async () => {
+      const buffer = new ClickBuffer(
+        {
+          recordClickBatch: async (clicks) =>
+            new Set(clicks.keys()),
+        },
+        1_000,
+        10_000,
+        3,
+      );
+
+      buffer.record("ghost");
+      buffer.record("ghost");
+
+      for (let attempt = 0; attempt < 5; attempt += 1) {
+        await buffer.flush();
+      }
+
+      expect(buffer.pendingClicks()).toBe(0);
+      expect(buffer.droppedClicks()).toBe(2);
+    },
+  );
 });

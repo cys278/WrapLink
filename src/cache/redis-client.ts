@@ -7,7 +7,8 @@ import type { AppConfig } from "../config.js";
 type RedisConfig = Pick<
   AppConfig,
   "redisUrl" | "redisClusterUrls"
->;
+> &
+  Partial<Pick<AppConfig, "redisClusterUseReplicas">>;
 
 function reconnectStrategy(
   retries: number,
@@ -31,6 +32,8 @@ export function createRedisClient(
             config.redisClusterUrls.map(
               (url) => ({ url }),
             ),
+          useReplicas:
+            config.redisClusterUseReplicas ?? false,
           defaults: {
             socket: {
               connectTimeout: 5_000,
