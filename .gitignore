@@ -5,3 +5,8 @@ dist/
 coverage/
 *.log
 benchmark/results/*.json
+.redis-cluster/
+cpp-redirect/build/
+cpp-redirect/core_test
+results/
+aggregate-summary.json
